@@ -38,20 +38,20 @@
 ## ⚙️ Installation
 
 ### Requirements
-- Python ≥ 3.10  
+- Python = 3.12  
 - CUDA Toolkit ≥ 12.0 (optional for GPU backend)
 
 Core dependencies:
 ```bash
-numpy
-numba
-scipy
-pandas
-matplotlib
+numpy >= 2.2.2,<2.3
+numba >= 0.61.2,<0.62
 ```
 
 Optional (profiling / plots):
 ```bash
+scipy
+pandas
+matplotlib
 seaborn
 psutil
 ```
