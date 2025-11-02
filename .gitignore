@@ -20,6 +20,8 @@
 *.xml
 *.json
 # *.prm  # Uncomment if you want to exclude parameter files
+# --- Allow TSV files in data/ ---
+!pydelphi/data/**/*.tsv
 
 # ---- Build & packaging ----
 .Python
@@ -76,7 +78,6 @@ cover/
 
 # ---- Documentation & Sphinx ----
 docs/_build/
-site/
 
 # ---- Editor & IDE files ----
 .vscode/
