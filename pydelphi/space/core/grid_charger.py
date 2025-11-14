@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides functionality for distributing atomic charges onto a 3D grid
@@ -138,7 +120,7 @@ def set_grid_charges_sorted_by_index1d(
     # --- Allocation ---
     total_slots = num_atoms * max_neighbors_per_atom
     fill_value = np.array([-1.0, 0.0, -1.0, -1.0, -1.0], dtype=np.float64)
-    contributions_array = np.empty((total_slots, 5), dtype=np.float64)
+    contributions_array = np.zeros((total_slots, 5), dtype=np.float64)
     contributions_array[:] = fill_value
 
     # --- Step 1: Generate Contributions ---
@@ -182,7 +164,7 @@ def set_grid_charges_sorted_by_index1d(
 
     # --- Step 5: Final Formatting and Counting ---
     num_unique_points = unique_contributions.shape[0]
-    index_sorted_charged_grids = np.empty((num_unique_points, 5), dtype=np.float64)
+    index_sorted_charged_grids = np.zeros((num_unique_points, 5), dtype=np.float64)
     index_sorted_charged_grids[:] = fill_value  # Initialize with default value
 
     (num_charged_grids, num_pve_charged_grids, num_nve_charged_grids) = (

@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module implements the Regularized Poisson-Boltzmann Equation (RPBE) solver,
@@ -86,37 +68,26 @@ from pydelphi.config.global_runtime import (
 
 from pydelphi.constants import ConstDelPhiFloats as ConstDelPhi
 
-# if (
-#     PRECISION.value == Precision.SINGLE.value
-#     or PRECISION.value == Precision.MIXED.value
-# ):
-#     from pydelphi.utils.prec.single import *
-#
-#     try:
-#         from pydelphi.utils.cuda.single import *
-#     except ImportError:
-#         pass
-#         # print("No Cuda")
-#
-# elif PRECISION.value == Precision.DOUBLE.value:
-#     from pydelphi.utils.prec.double import *
-#
-#     try:
-#         from pydelphi.utils.cuda.double import *
-#     except ImportError:
-#         pass
-#         # print("No Cuda")
 
 from pydelphi.config.logging_config import (
+    ERROR,
+    WARNING,
     INFO,
     DEBUG,
+    TRACE,
+    get_effective_verbosity,
 )
+
+_MODULE_NAME = __name__
+_VERBOSITY = get_effective_verbosity(_MODULE_NAME)
+
+from pydelphi.space.core.voxelizer import build_neighbor_voxel_unique_atom_index_map
 
 from pydelphi.solver.core import (
     _copy_to_sample,
     _copy_to_full,
     _sum_of_product_sample,
-    _calculate_phi_map_sample_rmsd,
+    _iteration_control_check,
 )
 
 from pydelphi.solver.shared.sor.base import (
@@ -125,8 +96,11 @@ from pydelphi.solver.shared.sor.base import (
     _cuda_init_relaxfactor_phimap,
     _cpu_iterate_relaxation_factor,
     _cuda_iterate_relaxation_factor,
-    _cpu_iterate_block_SOR,
+    _cpu_iterate_SOR,
+    _cpu_iterate_SOR_odd_with_dphi_rmsd,
     _cuda_iterate_SOR,
+    _cuda_reset_rmsd_and_dphi,
+    _cuda_iterate_SOR_odd_with_dphi_rmsd,
 )
 
 from pydelphi.solver.rpb.common_rpb import (
@@ -159,6 +133,10 @@ class RPBESolver:
         verbosity,
         num_cuda_threads,
         grid_shape,
+        coords_by_axis_min,
+        coords_by_axis_max,
+        num_objects,
+        num_molecules,
         coulomb_map_1d=None,
         grad_coulomb_map_1d=None,
         debug=False,
@@ -174,6 +152,10 @@ class RPBESolver:
         # Set the scalar variables used in the class
         self.num_cuda_threads = num_cuda_threads
         self.grid_shape = grid_shape
+        self.coords_by_axis_min = coords_by_axis_min
+        self.coords_by_axis_max = coords_by_axis_max
+        self.num_objects = num_objects
+        self.num_molecules = num_molecules
         self.num_grid_points = grid_shape[0] * grid_shape[1] * grid_shape[2]
         self.num_grad_map_points = self.num_grid_points * 3
         # Allocate and init with zero maps_3d and grad_maps_4d
@@ -210,7 +192,7 @@ class RPBESolver:
         coulomb_map_1d: np.ndarray[delphi_real],
         charge_map_1d: np.ndarray[delphi_real],
         eps_midpoint_neighs_sum_plus_salt_screening_1d: np.ndarray[delphi_real],
-        boundary_gridpoints_1d: np.ndarray[delphi_bool],
+        boundary_flags_1d: np.ndarray[delphi_bool],
     ):
         if self.platform.active == "cpu":
             set_num_threads(self.platform.names["cpu"]["num_threads"])
@@ -232,7 +214,7 @@ class RPBESolver:
                 coulomb_map_1d=coulomb_map_1d,
                 charge_map_1d=charge_map_1d,
                 eps_midpoint_neighs_sum_plus_salt_screening_1d=eps_midpoint_neighs_sum_plus_salt_screening_1d,
-                boundary_gridpoints_1d=boundary_gridpoints_1d,
+                boundary_flags_1d=boundary_flags_1d,
             )
         elif self.platform.active == "cuda":
             # BEGIN: CUDA call section for function: <<_prepare_to_iterate>>
@@ -244,12 +226,10 @@ class RPBESolver:
             epsmap_midpoints_1d_device = cuda.to_device(epsmap_midpoints_1d)
             coulomb_map_1d_device = cuda.to_device(self.coulomb_map_1d)
             charge_map_1d_device = cuda.to_device(charge_map_1d)
-            eps_nd_midpoint_neighs_sum_1d_device = cuda.device_array_like(
+            eps_nd_midpoint_neighs_sum_1d_device = cuda.to_device(
                 eps_midpoint_neighs_sum_plus_salt_screening_1d
             )
-            boundary_gridpoints_1d_device = cuda.device_array_like(
-                boundary_gridpoints_1d
-            )
+            boundary_gridpoints_1d_device = cuda.to_device(boundary_flags_1d)
             # CALL: CUDA kernel for the computation
             _cuda_prepare_charge_neigh_eps_sum_to_iterate[
                 num_blocks, self.num_cuda_threads
@@ -271,7 +251,7 @@ class RPBESolver:
             eps_nd_midpoint_neighs_sum_1d_device.copy_to_host(
                 eps_midpoint_neighs_sum_plus_salt_screening_1d
             )
-            boundary_gridpoints_1d_device.copy_to_host(boundary_gridpoints_1d)
+            boundary_gridpoints_1d_device.copy_to_host(boundary_flags_1d)
             # CLEAR: mark CUDA memory for garbage collection
             grid_shape_device = None
             surface_map_1d_device = None
@@ -309,7 +289,7 @@ class RPBESolver:
             epsmap_gridpoints_1d_device = cuda.to_device(epsmap_gridpoints_1d)
             grad_surface_map_1d_device = cuda.to_device(grad_surface_map_1d)
             grad_epsin_map_1d_device = cuda.to_device(grad_epsin_map_1d)
-            grad_epsmap_1d_device = cuda.device_array_like(grad_epsmap_1d)
+            grad_epsmap_1d_device = cuda.to_device(grad_epsmap_1d)
 
             n_blocks = (
                 grad_epsmap_1d.size + self.num_cuda_threads - 1
@@ -343,7 +323,29 @@ class RPBESolver:
         atoms_data,
         density_gridpoint_map_1d,
         grad_epsin_map_1d,
+        # --- Pass Voxel Map Parameters ---
+        voxel_atom_ids: np.ndarray[delphi_int],
+        voxel_atom_start_index: np.ndarray[delphi_int],
+        voxel_atom_end_index: np.ndarray[delphi_int],
+        voxel_map_origin: np.ndarray[delphi_real],
+        voxel_map_shape: np.ndarray[delphi_int],
+        voxel_map_scale: delphi_real,
+        # -------------------------------
     ):
+        num_atoms = atoms_data.shape[0]
+        # Step 1: build neighbor voxel map
+        (
+            neighbor_voxel_atom_ids_flat,
+            neighbor_voxel_start_index,
+            neighbor_voxel_end_index,
+            actual_neighbor_ids_count,
+        ) = build_neighbor_voxel_unique_atom_index_map(
+            num_atoms,
+            voxel_atom_ids,
+            voxel_atom_start_index,
+            voxel_atom_end_index,
+            voxel_map_shape,
+        )
         if self.platform.active == "cpu":
             set_num_threads(self.platform.names["cpu"]["num_threads"])
             _cpu_calc_grad_epsilon_in_map(
@@ -356,6 +358,14 @@ class RPBESolver:
                 atoms_data,
                 density_gridpoint_map_1d,
                 grad_epsin_map_1d,
+                # --- Pass Voxel Map Parameters ---
+                neighbor_voxel_atom_ids_flat,
+                neighbor_voxel_start_index,
+                neighbor_voxel_end_index,
+                voxel_map_origin,
+                voxel_map_shape,
+                voxel_map_scale,
+                # -------------------------------
             )
         elif self.platform.active == "cuda":
             # Allocating memory to call the cuda kernel for calculating the coulombic potential
@@ -363,7 +373,16 @@ class RPBESolver:
             grid_origin_device = cuda.to_device(grid_origin)
             atoms_data_device = cuda.to_device(atoms_data)
             density_gridpoint_map_1d_device = cuda.to_device(density_gridpoint_map_1d)
-            grad_epsin_map_1d_device = cuda.device_array_like(grad_epsin_map_1d)
+            grad_epsin_map_1d_device = cuda.to_device(grad_epsin_map_1d)
+            neighbor_voxel_atom_ids_flat_device = cuda.to_device(
+                neighbor_voxel_atom_ids_flat
+            )
+            neighbor_voxel_start_index_device = cuda.to_device(
+                neighbor_voxel_start_index
+            )
+            neighbor_voxel_end_index_device = cuda.to_device(neighbor_voxel_end_index)
+            voxel_map_origin_device = cuda.to_device(voxel_map_origin)
+            voxel_map_shape_device = cuda.to_device(voxel_map_shape)
 
             n_blocks = (
                 self.num_grid_points + self.num_cuda_threads - 1
@@ -378,6 +397,14 @@ class RPBESolver:
                 atoms_data_device,
                 density_gridpoint_map_1d_device,
                 grad_epsin_map_1d_device,
+                # --- Pass Voxel Map Parameters ---
+                neighbor_voxel_atom_ids_flat_device,
+                neighbor_voxel_start_index_device,
+                neighbor_voxel_end_index_device,
+                voxel_map_origin_device,
+                voxel_map_shape_device,
+                voxel_map_scale,
+                # -------------------------------
             )
             grad_epsin_map_1d_device.copy_to_host(grad_epsin_map_1d)
             # CLEAR: mark CUDA memory for garbage collection
@@ -394,6 +421,8 @@ class RPBESolver:
         epsout: delphi_real,
         gapdi: delphi_real,
         indi: delphi_real,
+        probe_radius: delphi_real,
+        salt_radius: delphi_real,
         approx_zero: delphi_real,
         grid_shape: np.ndarray[delphi_int],
         grid_origin: np.ndarray[delphi_real],
@@ -405,8 +434,74 @@ class RPBESolver:
         grad_epsmap_1d: np.ndarray[delphi_real],
         grad_epsin_map_1d: np.ndarray[delphi_real],
     ) -> None:
+        from pydelphi.constants import ATOMFIELD_RADIUS
+        from pydelphi.constants import ConstDelPhiFloats as ConstDelPhi
+
+        GAUSSIAN_INFLUENCE_RADIUS_FACTOR = (
+            ConstDelPhi.GaussianInfluenceRadiusFactor.value
+        )
+
+        from pydelphi.space.core.voxelizer import (
+            build_consolidated_atoms_space_voxel_map,
+        )
+
+        from pydelphi.space.core.gaussian import (
+            calc_atom_gaussian_influence_radius,
+        )
+
         grid_spacing = 1 / scale
         diff_gap_indi = gapdi - indi
+        num_atoms = atoms_data.shape[0]
+
+        # Determine the influence radius for density calculation
+        max_original_atom_radius = (
+            np.max(atoms_data[:, ATOMFIELD_RADIUS]) if num_atoms > 0 else 0.0
+        )
+
+        required_influence_radius = calc_atom_gaussian_influence_radius(
+            probe_radius=probe_radius,
+            salt_radius=salt_radius,
+            offset=0.0,
+            max_atom_radius=max_original_atom_radius,
+            atoms_data=atoms_data,
+            gaussian_decay_factor=GAUSSIAN_INFLUENCE_RADIUS_FACTOR,
+        )
+
+        # Re-build the voxel map using the inflated influence radius
+        (
+            new_voxel_params,
+            new_voxel_data,
+            time_elapsed,
+        ) = build_consolidated_atoms_space_voxel_map(
+            required_influence_radius,
+            self.coords_by_axis_min,
+            self.coords_by_axis_max,
+            1.0,
+            0.1,
+            num_atoms,
+            self.num_objects,
+            self.num_molecules,
+            atoms_data,
+        )
+        (
+            new_voxel_map_origin,
+            new_voxel_map_shape,
+            new_voxel_map_scale,
+            new_voxel_map_side,
+        ) = new_voxel_params
+        (
+            new_voxel_atom_ids,
+            new_voxel_start_index,
+            new_voxel_end_index,
+        ) = new_voxel_data
+
+        # Update the variables holding the voxel map to use
+        voxel_ids_to_use = new_voxel_atom_ids
+        voxel_start_idx_to_use = new_voxel_start_index
+        voxel_end_idx_to_use = new_voxel_end_index
+        voxel_origin_to_use = new_voxel_map_origin
+        voxel_shape_to_use = new_voxel_map_shape
+        voxel_scale_to_use = new_voxel_map_scale
 
         self._calc_grad_epsilon_in_map(
             gaussian_exponent,
@@ -418,6 +513,13 @@ class RPBESolver:
             atoms_data,
             density_gridpoint_map_1d,
             grad_epsin_map_1d,
+            # --- Voxel Map Parameters ---
+            voxel_atom_ids=voxel_ids_to_use,
+            voxel_atom_start_index=voxel_start_idx_to_use,
+            voxel_atom_end_index=voxel_end_idx_to_use,
+            voxel_map_origin=voxel_origin_to_use,
+            voxel_map_shape=voxel_shape_to_use,
+            voxel_map_scale=voxel_scale_to_use,
         )
 
         self._helper_calc_spatial_epsilon_map(
@@ -459,7 +561,7 @@ class RPBESolver:
             grid_shape_device = cuda.to_device(grid_shape)
             grid_origin_device = cuda.to_device(grid_origin)
             atoms_data_device = cuda.to_device(atoms_data)
-            coulomb_map_1d_device = cuda.device_array_like(coulomb_map_1d)
+            coulomb_map_1d_device = cuda.to_device(coulomb_map_1d)
             # CALL: CUDA kernel for the computation
             _cuda_calc_coulomb_map[n_blocks, self.num_cuda_threads](
                 grid_spacing,
@@ -516,7 +618,7 @@ class RPBESolver:
             grid_origin_device = cuda.to_device(grid_origin)
             atoms_data_device = cuda.to_device(atoms_data)
             # coulomb_map_1d_device = cuda.to_device(self.coulomb_map_1d)
-            grad_coulomb_map_1d_device = cuda.device_array_like(grad_coulomb_map_1d)
+            grad_coulomb_map_1d_device = cuda.to_device(grad_coulomb_map_1d)
             # CALL: CUDA kernel for the computation
             _cuda_calc_grad_coulomb_map[n_blocks, self.num_cuda_threads](
                 grid_spacing,
@@ -556,7 +658,7 @@ class RPBESolver:
             ) // self.num_cuda_threads
             grad_epsmap_1d_device = cuda.to_device(grad_epsmap_1d)
             grad_coulomb_map_1d_device = cuda.to_device(grad_coulomb_map_1d)
-            eps_dot_coul_map_1d_device = cuda.device_array_like(eps_dot_coul_map_1d)
+            eps_dot_coul_map_1d_device = cuda.to_device(eps_dot_coul_map_1d)
             # CALL: CUDA kernel for the computation
             _cuda_grad_epsilon_dot_coulomb_map[n_blocks, self.num_cuda_threads](
                 grad_epsmap_1d_device,
@@ -580,6 +682,8 @@ class RPBESolver:
         exdi: delphi_real,
         gapdi: delphi_real,
         indi: delphi_real,
+        probe_radius: delphi_real,
+        salt_radius: delphi_real,
         epkt: delphi_real,
         approx_zero: delphi_real,
         grid_shape: np.ndarray[delphi_int],
@@ -605,6 +709,8 @@ class RPBESolver:
             epsout=epsout,
             gapdi=gapdi,
             indi=indi,
+            probe_radius=probe_radius,
+            salt_radius=salt_radius,
             approx_zero=approx_zero,
             grid_shape=grid_shape,
             grid_origin=grid_origin,
@@ -706,22 +812,52 @@ class RPBESolver:
         epsmap_midpoints_1d: np.ndarray[delphi_real],
         eps_nd_midpoint_neighs_sum_1d: np.ndarray[delphi_real],
         boundary_gridpoints_1d: np.ndarray[delphi_bool],
-    ) -> delphi_real:
-        """Calculates the spectral radius for SOR iteration.
+    ) -> tuple[delphi_real, delphi_real]:
+        """
+        Estimates the spectral radius (ρ) and optimal SOR relaxation factor (ω_SOR)
+        for the given dielectric distribution.
 
-        Estimates the optimal spectral radius using a power iteration method with a sine function
-        as the initial guess for the eigenvector corresponding to the largest eigenvalue.
+        This routine performs a power–iteration–like procedure to estimate the dominant
+        eigenvalue of the linearized Poisson–Boltzmann operator. The eigenvector is
+        initialized as a separable sine function to approximate the fundamental mode
+        of the Laplacian under the specified boundary conditions.
+
+        The resulting spectral radius is used to compute the optimal over-relaxation
+        factor ω_SOR according to the classical SOR convergence relation:
+
+            ω_SOR = 2 / (1 + sqrt(1 − ρ²))
+
+        The procedure supports both CPU and CUDA execution. CUDA execution performs
+        in-place device iterations and copies the intermediate maps back to host for
+        the final RMSD-based spectral radius evaluation.
 
         Args:
-            itr_block_size (delphi_int): Block size for iteration.
-            grid_shape (np.ndarray[delphi_int]): Shape of the grid.
-            periodic_boundary_xyz (np.ndarray[delphi_bool]): Periodic boundary condition flags.
-            epsmap_midpoints_1d (np.ndarray[delphi_real]): 1D midpoint dielectric map.
-            eps_nd_midpoint_neighs_sum_1d (np.ndarray[delphi_real]): 1D array of neighbor epsilon sums.
-            boundary_gridpoints_1d (np.ndarray[delphi_bool]): 1D boundary points array.
+            itr_block_size (delphi_int):
+                Number of SOR iterations (power iterations) used to estimate ρ.
+            grid_shape (np.ndarray[delphi_int]):
+                Grid dimensions as (nx, ny, nz).
+            periodic_boundary_xyz (np.ndarray[delphi_bool]):
+                Flags indicating periodic boundary conditions along each axis.
+            epsmap_midpoints_1d (np.ndarray[delphi_real]):
+                1D flattened dielectric map evaluated at grid midpoints.
+            eps_nd_midpoint_neighs_sum_1d (np.ndarray[delphi_real]):
+                1D array of summed neighbor dielectric constants for each grid cell.
+            boundary_gridpoints_1d (np.ndarray[delphi_bool]):
+                Boolean mask marking boundary gridpoints.
 
         Returns:
-            delphi_real: The calculated spectral radius.
+            tuple[delphi_real, delphi_real]:
+                A tuple `(spectral_radius, omega_sor)` where:
+
+                * `spectral_radius` (ρ): Estimated dominant eigenvalue magnitude.
+                * `omega_sor` (ω_SOR): Optimal SOR relaxation factor derived from ρ.
+
+        Notes:
+            - Arrays `eps_nd_midpoint_neighs_sum_1d` and `boundary_gridpoints_1d`
+              must be zero-initialized before use.
+            - For CUDA execution, this function allocates temporary device buffers and
+              synchronizes results to host before returning.
+            - Spectral radius values > 1 are clamped to 1 to maintain stability.
         """
         # Initialize sine values and phimap arrays for relaxation computation
         sin_values_x = np.zeros(grid_shape[0], dtype=delphi_real)
@@ -846,7 +982,9 @@ class RPBESolver:
         if spectral_radius > 1.0:
             spectral_radius = 1.0
 
-        return spectral_radius
+        omega_sor = delphi_real(2.0 / (1.0 + math.sqrt(1.0 - spectral_radius)))
+
+        return spectral_radius, omega_sor
 
     def run(
         self,
@@ -861,11 +999,13 @@ class RPBESolver:
         exdi: delphi_real,
         gapdi: delphi_real,
         indi: delphi_real,
+        probe_radius: delphi_real,
+        salt_radius: delphi_real,
         debye_length: delphi_real,
         total_pve_charge: delphi_real,
         total_nve_charge: delphi_real,
-        max_rms: delphi_real,
-        max_dphi: delphi_real,
+        rms_tol: delphi_real,
+        dphi_tol: delphi_real,
         check_dphi: delphi_bool,
         epkt: delphi_real,
         approx_zero: delphi_real,
@@ -880,6 +1020,7 @@ class RPBESolver:
         centroid_pve_charge: np.ndarray[delphi_real],
         centroid_nve_charge: np.ndarray[delphi_real],
         grad_surface_map_1d: np.ndarray[delphi_real],
+        verbose: delphi_bool = True,
     ) -> np.ndarray[delphi_real]:
         if self.platform.active == "cuda":
             cuda.select_device(self.platform.names["cuda"]["selected_id"])
@@ -898,6 +1039,8 @@ class RPBESolver:
             exdi=exdi,
             gapdi=gapdi,
             indi=indi,
+            probe_radius=probe_radius,
+            salt_radius=salt_radius,
             epkt=epkt,
             approx_zero=approx_zero,
             grid_shape=grid_shape,
@@ -944,10 +1087,10 @@ class RPBESolver:
             "phimap_current_1d after bc:",
             phimap_current_1d[:100],
         )
-        eps_nd_midpoint_neighs_sum_1d = np.empty(
+        eps_nd_midpoint_neighs_sum_1d = np.zeros(
             grid_shape[0] * grid_shape[1] * grid_shape[2], dtype=delphi_real
         )
-        boundary_gridpoints_1d = np.empty(
+        boundary_flags_1d = np.zeros(
             grid_shape[0] * grid_shape[1] * grid_shape[2], dtype=delphi_bool
         )
         charge_map_1d = np.copy(self.eps_dot_coul_map_1d)
@@ -969,7 +1112,7 @@ class RPBESolver:
             coulomb_map_1d=self.coulomb_map_1d,
             charge_map_1d=charge_map_1d,
             eps_midpoint_neighs_sum_plus_salt_screening_1d=eps_nd_midpoint_neighs_sum_1d,
-            boundary_gridpoints_1d=boundary_gridpoints_1d,
+            boundary_flags_1d=boundary_flags_1d,
         )
         toc_prepitr = time.perf_counter()
         self.timings[f"rpbe, {self.phase}| prepare for iteration"] = "{:0.3f}".format(
@@ -983,25 +1126,25 @@ class RPBESolver:
             )
 
         self.num_grid_points_half = (self.num_grid_points + 1) // 2
-        phimap_even_1d = np.zeros(self.num_grid_points_half, dtype=delphi_real)
-        phimap_odds_1d = np.zeros(self.num_grid_points_half, dtype=delphi_real)
-        _copy_to_sample(phimap_even_1d, phimap_current_1d, 0, 2)
-        _copy_to_sample(phimap_odds_1d, phimap_current_1d, 1, 2)
 
-        relax_factor = self._calc_relaxation_factor(
-            3,
+        phimap_even_half_1d = np.zeros(self.num_grid_points_half, dtype=delphi_real)
+        phimap_odd_half_1d = np.zeros(self.num_grid_points_half, dtype=delphi_real)
+        _copy_to_sample(phimap_even_half_1d, phimap_current_1d, 0, 2)
+        _copy_to_sample(phimap_odd_half_1d, phimap_current_1d, 1, 2)
+
+        spectral_radius, omega_sor = self._calc_relaxation_factor(
+            1,
             grid_shape,
-            (0, 0, 0),
+            np.zeros(3, dtype=delphi_bool),
             epsmap_midpoints_1d,
             eps_nd_midpoint_neighs_sum_1d,
-            boundary_gridpoints_1d,
+            boundary_flags_1d,
         )
 
-        num_iters_estimated = (int)(7.8 / math.log(1.0 + math.sqrt(1 - relax_factor)))
-        # print("Print estimated number of iterations: ", num_iters_estimated)
-        omega = 1 - (2.0 / (1.0 + math.sqrt(1.0 - relax_factor)))
-        print(
-            f"    RPBE> Relaxation-factor = {relax_factor:10.6f} and SOR-omega = {omega:10.6f}"
+        vprint(
+            INFO,
+            _VERBOSITY,
+            f"\n    RPBE> Spectral radius (ρ) = {spectral_radius:.6f}, Relaxation factor (ω_SOR) = {omega_sor:.6f}",
         )
 
         toc_calrelpar = time.perf_counter()
@@ -1014,133 +1157,224 @@ class RPBESolver:
             n_blocks = (self.num_grid_points_half + self.num_cuda_threads - 1) // (
                 self.num_cuda_threads
             )
-            # BEGIN: send common data to CUDA for all the iterations
+            # Read only device arrays for all iterations
             grid_shape_device = cuda.to_device(grid_shape)
             epsmap_midpoints_1d_device = cuda.to_device(epsmap_midpoints_1d)
             eps_nd_midpoint_neighs_sum_1d_device = cuda.to_device(
                 eps_nd_midpoint_neighs_sum_1d
             )
-            boundary_gridpoints_1d_device = cuda.to_device(boundary_gridpoints_1d)
+            boundary_gridpoints_1d_device = cuda.to_device(boundary_flags_1d)
             charge_map_1d_device = cuda.to_device(charge_map_1d)
-            # END: send common data to CUDA for all the iterations
 
-        do_iterate, itr_num = True, 0
-        while do_iterate:
-            tic_itr = time.perf_counter()
-            if itr_num == 0:
+            # Read write device arrays
+            phimap_even_half_1d_device = cuda.to_device(phimap_even_half_1d)
+            phimap_odd_half_1d_device = cuda.to_device(phimap_odd_half_1d)
+
+            # Output singleton arrays for iter+reduction fused kernel
+            sum_squared_host = np.zeros(1, dtype=np.float64)
+            max_delta_phi_host = np.zeros(1, dtype=np.float64)
+            sum_squared_device = cuda.to_device(sum_squared_host)
+            max_delta_phi_device = cuda.to_device(max_delta_phi_host)
+
+        rmsd_buffer = np.zeros(10, dtype=np.float64)  # rolling RMSD buffer
+        ptr = 0
+        wrapped = False
+        total_iter = 0
+
+        for iter_block_start in range(0, max_linear_iters, itr_block_size):
+            tic_block = time.perf_counter()
+            if total_iter == 0:
                 vprint(
                     INFO,
                     self.verbosity,
                     f"    RPBE> | #Iteration |    RMSD    |  Max(dPhi) | Time (seconds) |",
                 )
+
+            total_sum_sq = 0.0
+            rmsd = 0.0
+            max_delta_phi = 0.0
+
             if self.platform.active == "cuda":
-                # BEGIN: send data to CUDA which is updated every iterations
-                # and do the iteration.
-                phimap_even_1d_device = cuda.to_device(phimap_even_1d)
-                phimap_odds_1d_device = cuda.to_device(phimap_odds_1d)
-                for itrid in range(itr_num + 1, itr_num + itr_block_size + 1):
-                    for even_odd in np.array([0, 1], dtype=delphi_int):
+                for itr_in_block in range(itr_block_size):
+                    for even_odd in (0, 1):
+                        is_last_iter_of_block = itr_in_block == itr_block_size - 1
+                        is_last_overall = (
+                            iter_block_start + itr_in_block + 1 >= max_linear_iters
+                        )
+
+                        # --- Select read/write halves (identical to CPU version) ---
                         if even_odd == 0:
-                            # Iterate for gridpoints where indices_sum is even
-                            _cuda_iterate_SOR[n_blocks, self.num_cuda_threads](
+                            phi_half_read = phimap_odd_half_1d_device
+                            phi_half_write = phimap_even_half_1d_device
+                        else:
+                            phi_half_read = phimap_even_half_1d_device
+                            phi_half_write = phimap_odd_half_1d_device
+
+                        # Determine if this iteration should compute RMSD
+                        is_last_odd_iter_of_block = (even_odd == 1) and (
+                            is_last_iter_of_block or is_last_overall
+                        )
+                        if is_last_odd_iter_of_block:
+                            _cuda_reset_rmsd_and_dphi[1, 1](
+                                sum_squared_device, max_delta_phi_device
+                            )
+
+                            _cuda_iterate_SOR_odd_with_dphi_rmsd[
+                                n_blocks, self.num_cuda_threads
+                            ](
                                 even_odd,
-                                omega,
+                                omega_sor,
                                 approx_zero,
                                 grid_shape_device,
-                                phimap_odds_1d_device,
-                                phimap_even_1d_device,
+                                phi_half_read,
+                                phi_half_write,
+                                epsmap_midpoints_1d_device,
+                                eps_nd_midpoint_neighs_sum_1d_device,
+                                boundary_gridpoints_1d_device,
+                                charge_map_1d_device,
+                                sum_squared_device,
+                                max_delta_phi_device,
+                            )
+                            cuda.synchronize()
+
+                            # Retrieve block RMSD/Δφ only after last odd iteration
+                            sum_squared_device.copy_to_host(sum_squared_host)
+                            max_delta_phi_device.copy_to_host(max_delta_phi_host)
+                        else:
+                            _cuda_iterate_SOR[n_blocks, self.num_cuda_threads](
+                                even_odd,
+                                omega_sor,
+                                approx_zero,
+                                grid_shape_device,
+                                phi_half_read,
+                                phi_half_write,
                                 epsmap_midpoints_1d_device,
                                 eps_nd_midpoint_neighs_sum_1d_device,
                                 boundary_gridpoints_1d_device,
                                 charge_map_1d_device,
                             )
-                        elif even_odd == 1:
-                            _cuda_iterate_SOR[n_blocks, self.num_cuda_threads](
-                                even_odd,
-                                omega,
-                                approx_zero,
-                                grid_shape_device,
-                                phimap_even_1d_device,
-                                phimap_odds_1d_device,
-                                epsmap_midpoints_1d_device,
-                                eps_nd_midpoint_neighs_sum_1d_device,
-                                boundary_gridpoints_1d_device,
-                                charge_map_1d_device,
-                            )
-                            # END: CUDA call every iteration
-                        if itrid == itr_num + itr_block_size - 1:
-                            phimap_odds_1d_device.copy_to_host(phimap_odds_1d)
-                            _copy_to_full(phimap_current_1d, phimap_odds_1d, 1, 2)
-                # FETCH RESULTS TO HOST FROM DEVICE
-                phimap_odds_1d_device.copy_to_host(phimap_odds_1d)
-                phimap_even_1d_device.copy_to_host(phimap_even_1d)
-                # CLEAR: mark CUDA memory for this iteration_block for garbage collection
-                phimap_odds_1d_device = None
-                phimap_even_1d_device = None
+                            cuda.synchronize()
+
+                rmsd = math.sqrt(sum_squared_host[0] / self.num_grid_points_half)
+                max_delta_phi = abs(max_delta_phi_host[0])
+
             elif self.platform.active == "cpu":
                 set_num_threads(self.num_cpu_threads)
-                _cpu_iterate_block_SOR(
-                    itr_num,
-                    itr_block_size - 1,
-                    omega,
-                    approx_zero,
-                    grid_shape,
-                    phimap_odds_1d,
-                    phimap_even_1d,
-                    epsmap_midpoints_1d,
-                    eps_nd_midpoint_neighs_sum_1d,
-                    boundary_gridpoints_1d,
-                    charge_map_1d,
-                )
-                _copy_to_full(phimap_current_1d, phimap_odds_1d, 1, 2)
-                _cpu_iterate_block_SOR(
-                    itr_num + itr_block_size - 1,
-                    1,
-                    omega,
-                    approx_zero,
-                    grid_shape,
-                    phimap_odds_1d,
-                    phimap_even_1d,
-                    epsmap_midpoints_1d,
-                    eps_nd_midpoint_neighs_sum_1d,
-                    boundary_gridpoints_1d,
-                    charge_map_1d,
-                )
+                for itr_in_block in range(itr_block_size):
+                    for even_odd in (0, 1):
+                        is_last_iter_of_block = itr_in_block == itr_block_size - 1
+                        is_last_overall = (
+                            iter_block_start + itr_in_block + 1 >= max_linear_iters
+                        )
 
-            itr_num += itr_block_size
-            if itr_num % itr_block_size == 0:
-                rmsd, max_delta_phi = _calculate_phi_map_sample_rmsd(
-                    phimap_current_1d,
-                    phimap_odds_1d,
-                    offset=1,
-                    stride=2,
-                    num_cpu_threads=self.num_cpu_threads,
-                    dtype=delphi_real,
-                )
-                max_delta_phi = abs(max_delta_phi)
-                if itr_num >= max_linear_iters:
-                    do_iterate = False
-                elif (not check_dphi) and rmsd < max_rms:
-                    do_iterate = False
-                elif check_dphi and max_delta_phi < max_dphi:
-                    do_iterate = False
-                toc_itr = time.perf_counter()
+                        # --- Select read/write halves (identical to CPU version) ---
+                        if even_odd == 0:
+                            phi_half_read = phimap_odd_half_1d
+                            phi_half_write = phimap_even_half_1d
+                        else:
+                            phi_half_read = phimap_even_half_1d
+                            phi_half_write = phimap_odd_half_1d
 
-                vprint(
-                    INFO,
-                    self.verbosity,
-                    f"    RPBE> | {itr_num:>10d} | {rmsd:>9.04e} | {max_delta_phi:>9.04e} | {toc_itr - tic_itr:14.06f} |",
-                )
-                _copy_to_full(phimap_current_1d, phimap_even_1d, 0, 2)
-                _copy_to_full(phimap_current_1d, phimap_odds_1d, 1, 2)
+                        # Determine if this iteration should compute RMSD
+                        is_last_odd_iter_of_block = (even_odd == 1) and (
+                            is_last_iter_of_block or is_last_overall
+                        )
+                        if is_last_odd_iter_of_block:
+                            total_sum_sq, max_delta_phi = (
+                                _cpu_iterate_SOR_odd_with_dphi_rmsd(
+                                    num_cpu_threads=self.num_cpu_threads,
+                                    even_odd=even_odd,
+                                    omega_sor=omega_sor,
+                                    approx_zero=approx_zero,
+                                    grid_shape=grid_shape,
+                                    phi_map_current_half_1d=phi_half_read,
+                                    phi_map_next_half_1d=phi_half_write,
+                                    epsilon_map_midpoints_1d=epsmap_midpoints_1d,
+                                    epsilon_sum_neighbors_plus_salt_screening_1d=eps_nd_midpoint_neighs_sum_1d,
+                                    is_boundary_gridpoint_1d=boundary_flags_1d,
+                                    charge_map_1d=charge_map_1d,
+                                )
+                            )
+                        else:
+                            _cpu_iterate_SOR(
+                                even_odd=even_odd,
+                                omega_sor=omega_sor,
+                                approx_zero=approx_zero,
+                                grid_shape=grid_shape,
+                                phi_map_current_half_1d=phi_half_read,
+                                phi_map_next_half_1d=phi_half_write,
+                                epsilon_map_midpoints_1d=epsmap_midpoints_1d,
+                                epsilon_sum_neighbors_plus_salt_screening_1d=eps_nd_midpoint_neighs_sum_1d,
+                                is_boundary_gridpoint_1d=boundary_flags_1d,
+                                charge_map_1d=charge_map_1d,
+                            )
+
+                rmsd = math.sqrt(total_sum_sq / self.num_grid_points_half)
+
+            total_iter += itr_block_size
+            toc_block = time.perf_counter()
+            block_time = toc_block - tic_block
+
+            vprint(
+                INFO,
+                self.verbosity,
+                f"    RPBE> | {total_iter:>10d} | {rmsd:>9.04e} | {max_delta_phi:>9.04e} | {block_time:14.06f} |",
+            )
+
+            # --- unified iteration control ---
+            stop_iters, status, ptr, wrapped = _iteration_control_check(
+                rmsd_buffer,
+                ptr,
+                wrapped,
+                rmsd,
+                max_delta_phi,
+                rms_tol,
+                dphi_tol,
+                check_dphi,
+                max_linear_iters,
+                total_iter,
+                disable_stagnation_check=False,
+            )
+
+            if stop_iters:
+                if status == 1:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (RMSD/ΔΦ thresholds satisfied)",
+                    )
+                elif status == 2:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (stagnation plateau, relaxed criterion)",
+                    )
+                elif status == 3:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Divergence detected (non-finite residuals)",
+                    )
+                break
+
         if self.platform.active == "cuda":
-            # BEGIN: clear the CUDA memory after the iterations
+            phimap_even_half_1d_device.copy_to_host(phimap_even_half_1d)
+            phimap_odd_half_1d_device.copy_to_host(phimap_odd_half_1d)
+
             grid_shape_device = None
             epsmap_midpoints_1d_device = None
             eps_nd_midpoint_neighs_sum_1d_device = None
             boundary_gridpoints_1d_device = None
             charge_map_1d_device = None
-            # END: clear the cuda memory after the iterations
+            phimap_odd_half_1d_device = None
+            phimap_even_half_1d_device = None
+
+            sum_squared_device = None
+            max_delta_phi_device = None
+
+        _copy_to_full(phimap_current_1d, phimap_even_half_1d, 0, 2)
+        _copy_to_full(phimap_current_1d, phimap_odd_half_1d, 1, 2)
+
         phimap_current_1d = phimap_current_1d.reshape(grid_shape)
         return phimap_current_1d
 
@@ -1190,7 +1424,7 @@ class RPBESolver:
                 grid_shape_device = cuda.to_device(grid_shape)
                 atoms_data_device = cuda.to_device(atoms_data)
                 coulomb_map_1d_device = cuda.to_device(coulomb_map_1d)
-                phimap_1d_device = cuda.device_array_like(phimap_1d)
+                phimap_1d_device = cuda.to_device(phimap_1d)
                 # CALL: CUDA kernel for the computation
                 _cuda_setup_coulombic_boundary_condition[
                     n_blocks, self.num_cuda_threads
@@ -1241,7 +1475,7 @@ class RPBESolver:
                 centroid_pve_charge_device = cuda.to_device(centroid_pve_charge)
                 centroid_nve_charge_device = cuda.to_device(centroid_nve_charge)
                 coulomb_map_1d_device = cuda.to_device(coulomb_map_1d)
-                phimap_1d_device = cuda.device_array_like(phimap_1d)
+                phimap_1d_device = cuda.to_device(phimap_1d)
                 # CALL: CUDA kernel for the computation
                 _cuda_setup_dipolar_boundary_condition[n_blocks, self.num_cuda_threads](
                     vacuum,

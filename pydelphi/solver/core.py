@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides Numba-optimized functions for manipulating and analyzing
@@ -222,3 +204,128 @@ def _calculate_phi_map_sample_rmsd(
 
     # Cast final result to match input dtype
     return dtype(rmsd), dtype(max_deviation)
+
+
+@njit(nogil=True, boundscheck=False, cache=True)
+def _iteration_control_check(
+    rmsd_buf: np.ndarray,
+    ptr: int,
+    wrapped: bool,
+    rmsd: float,
+    dphi: float,
+    rms_threshold: float,
+    dphi_threshold: float,
+    enforce_dphi: bool,
+    max_iters: int,
+    iteration: int,
+    disable_stagnation_check: bool = False,
+    flip_limit: int = 3,
+):
+    """
+    Unified iteration control for linear and nonlinear solvers.
+
+    Performs convergence, divergence, and *consecutive sign-flip* stagnation
+    detection using a circular buffer of recent RMSD values.
+
+    The stagnation detector identifies oscillatory RMSD behavior by counting
+    consecutive changes in the sign of ΔRMSD = RMSD[i−1] − RMSD[i].
+    It tolerates short same-sign sequences, capturing both single-step (↓↑)
+    and multi-step (↓↓↑↑) oscillations typical of block-wise or nonlinear
+    relaxation behavior.
+
+    Args:
+        rmsd_buf (np.ndarray): Circular buffer storing recent RMSD values.
+        ptr (int): Current write index in buffer.
+        wrapped (bool): Whether buffer has completed a full cycle.
+        rmsd (float): Current RMSD value.
+        dphi (float): Current ΔΦ (maximum potential change).
+        rms_threshold (float): RMSD convergence tolerance.
+        dphi_threshold (float): ΔΦ convergence tolerance.
+        enforce_dphi (bool): Whether ΔΦ-based convergence is enforced.
+        max_iters (int): Maximum iteration count allowed.
+        iteration (int): Current global iteration number.
+        disable_stagnation_check (bool): If True, disables stagnation detection.
+        flip_limit (int): Number of *consecutive* ΔRMSD sign flips required to
+                          declare stagnation (default=3).
+
+    Returns:
+        (stop, status, ptr_next, wrapped):
+            stop (bool): True if iteration should stop.
+            status (int):
+                0 = continue
+                1 = converged (threshold satisfied)
+                2 = stagnation plateau (relaxed convergence)
+                3 = divergence (monotonic RMSD increase or NaN detected)
+            ptr_next (int): Updated buffer pointer.
+            wrapped (bool): Updated wrapped flag.
+    """
+    # --- Divergence / NaN safety ---
+    if not math.isfinite(rmsd) or (enforce_dphi and not math.isfinite(dphi)):
+        return True, 3, ptr, wrapped
+
+    # --- Primary convergence check ---
+    if enforce_dphi:
+        if dphi < dphi_threshold:
+            return True, 1, ptr, wrapped
+    else:
+        if rmsd < rms_threshold:
+            return True, 1, ptr, wrapped
+
+    # --- Update circular buffer ---
+    n = rmsd_buf.size
+    rmsd_buf[ptr] = rmsd
+    ptr_next = (ptr + 1) % n
+    if not wrapped and ptr_next == 0:
+        wrapped = True
+
+    # --- Stagnation & divergence detection ---
+    if (not disable_stagnation_check) and wrapped:
+        flip_streak = 0
+        same_sign_count = 0
+        last_sign = 0
+        increasing_count = 0
+        decreasing_count = 0
+
+        # Chronological scan (oldest → newest)
+        for i in range(1, n):
+            i0 = (ptr_next + i - 1) % n
+            i1 = (ptr_next + i) % n
+            dr = rmsd_buf[i0] - rmsd_buf[i1]
+            sign = 1 if dr > 0 else (-1 if dr < 0 else 0)
+
+            if sign == 0:
+                continue
+
+            # Track monotonic trends
+            if sign > 0:
+                decreasing_count += 1
+            elif sign < 0:
+                increasing_count += 1
+
+            # Detect oscillatory sign alternations
+            if last_sign != 0 and sign != last_sign:
+                flip_streak += 1
+                same_sign_count = 0
+            else:
+                same_sign_count += 1
+                # Allow limited persistence of same-sign segments
+                if same_sign_count > 2:
+                    flip_streak = max(0, flip_streak - 1)
+                    same_sign_count = 0
+
+            last_sign = sign
+
+            # Early stop on sufficient consecutive flips
+            if flip_streak >= flip_limit:
+                return True, 2, ptr_next, wrapped
+
+        # --- Monotonic divergence detection ---
+        if increasing_count >= int(0.6 * n):
+            return True, 3, ptr_next, wrapped
+
+    # --- Max iteration fallback ---
+    if iteration >= max_iters:
+        return True, 2, ptr_next, wrapped
+
+    # Continue iterating
+    return False, 0, ptr_next, wrapped

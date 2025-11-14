@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 from pydelphi.foundation.enums import (
     PBSolver,
@@ -104,6 +87,23 @@ def get_param_definitions():
         required=True,
     )
 
+    params[("nonlinear_iteration_block_size", "nlitrblocksize", "nlitrbsz")] = (
+        ParamStatement(
+            full_name="nonlinear_iteration_block_size",
+            long_name="nlitrblocksize",
+            short_name="nlitrbsz",
+            units=None,
+            dtype=int,
+            default=5,
+            min_value=1,
+            max_value=1000,
+            override=True,
+            desc_short="Number of iterations performed in an iteration block and after which RMSD is calculated during nonlinear coupling steps of SOR.",
+            desc_long="Number of iterations performed in an iteration block and after which RMSD is calculated  during nonlinear coupling steps of SOR.",
+            required=True,
+        )
+    )
+
     params[("max_nonlinear_iteration", "nonlinit", "nonit")] = ParamStatement(
         full_name="max_nonlinear_iteration",
         long_name="nonlinit",
@@ -143,14 +143,46 @@ def get_param_definitions():
             short_name="nlrelpar",
             units=None,
             dtype=float,
-            default=0.0,
+            default=0.0,  # default: no damping
             min_value=0.0,
             max_value=2.0,
             override=True,
-            desc_short="Relaxation parameter to use for non-linear PB iterations.",
-            desc_long="Relaxation parameter to use for non-linear PB iterations.",
+            desc_short="Relaxation factor ω applied to non-linear PB updates.",
+            desc_long=(
+                "Controls the relaxation applied to nonlinear PB updates:\n\n"
+                "    φ_new = (1 - ω)·φ_old + ω·φ_GS\n\n"
+                "Special values:\n"
+                "  ω = 0.0 → use automatically computed ω_SOR (default)\n"
+                "  ω = 1.0 → no damping (pure Gauss–Seidel)\n"
+                "  ω < 1.0 → under-relaxation (more stable)\n"
+                "  ω > 1.0 → over-relaxation (faster, may diverge)\n"
+                "Valid range: 0–2. Recommended range: 0.7–1.2 depending on convergence stability."
+            ),
             required=False,
         )
+    )
+
+    params[("nwt_adaptive_omega", "nwtomega", "nwtw")] = ParamStatement(
+        full_name="nwt_adaptive_omega",
+        long_name="nwtomega",
+        short_name="nwtw",
+        units=None,
+        dtype=float,
+        default=1.0,
+        min_value=0.1,  # prevents frozen or near-zero update steps
+        max_value=1.0,
+        override=True,
+        desc_short="Adaptive damping factor for NWT nonlinear iterations.",
+        desc_long=(
+            "Adaptive damping factor ω_adaptive for the Newton (NWT) nonlinear "
+            "iteration scheme. Values below 1.0 under-relax updates for improved "
+            "stability in strongly nonlinear or oscillatory cases. Default is 1.0 "
+            "(pure Newton–Gauss–Seidel). Values below 0.1 are automatically capped "
+            "to 0.1 to prevent stalled iterations. Values above 1.0 are capped to "
+            "1.0 and can cause divergence. The value 0.0 is reserved for potential "
+            "future use as an auto-adaptive sentinel."
+        ),
+        required=False,
     )
 
     params[("boundary_condition", "bndcon", "bc")] = ParamStatement(

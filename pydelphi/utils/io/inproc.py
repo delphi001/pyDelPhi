@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 Parameter definition and input handling module for Delphi simulations.
@@ -789,6 +771,7 @@ class Inputs:
             if solver_value == PBSolver.NWT:
                 params["nonlinear_coupling_steps"].deactivate()
                 params["nonlinear_relaxation_param"].deactivate()
+                # params["nonlinear_iteration_block_size"].deactivate()
                 params["max_nonlinear_coupling_delta_phi"].deactivate()
 
     def _configure_pbe_biomodel(

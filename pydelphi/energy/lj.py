@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides functions for calculating the Lennard-Jones energy between atoms,
@@ -234,7 +216,9 @@ def _cpu_lj_energy_kernel(atoms_data: np.ndarray) -> np.float64:
 
 
 # --- Lennard-Jones CUDA Kernel ---
-@cuda.jit(cache=True, fastmath=False)  # fastmath=False recommended for scientific accuracy
+@cuda.jit(
+    cache=True, fastmath=False
+)  # fastmath=False recommended for scientific accuracy
 def _cuda_lj_energy_kernel(atoms_data, energy_block):
     """
     CUDA kernel: Computes raw Lennard-Jones energy sum using shared memory reduction.

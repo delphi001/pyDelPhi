@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module calculates the non-linear Coulombic energy by summing the product
@@ -261,7 +243,7 @@ def _cuda_calc_energy_clbnonl_kernel(
     grid_shape : Tuple[int, int, int]
         Device array containing the grid's shape (dimensions).
     energy_out : np.ndarray
-        A single-element device array (e.g., `cuda.device_array(1)`)
+        A single-element device array
         where the total energy will be atomically accumulated.
     """
     i = cuda.grid(1)
@@ -301,7 +283,7 @@ def _cuda_calc_energy_clbnonl(
     grid_shape : np.ndarray
         Device array of 3-ints containing the grid's shape (dimensions).
     energy_out : np.ndarray
-        A single-element device array (e.g., `cuda.device_array(1)`)
+        A single-element device array
         where the total energy will be atomically accumulated.
     """
     n_atoms = atoms_data.shape[0]
@@ -310,7 +292,7 @@ def _cuda_calc_energy_clbnonl(
 
     d_atoms = cuda.to_device(atoms_data)
     d_phi = cuda.to_device(phi_grid)
-    d_energy = cuda.device_array(1, dtype=atoms_data.dtype)
+    d_energy = cuda.to_device(np.zeros(1, dtype=atoms_data.dtype))
     d_energy[0] = 0.0
 
     grid_origin_tuple = tuple(grid_origin)

@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides utility functions and a class (`SurfaceMolecularVdW`)
@@ -64,7 +46,7 @@ import time
 import numpy as np
 
 from math import sqrt
-from numba import njit
+from numba import njit, prange
 
 from pydelphi.foundation.enums import (
     Precision,
@@ -509,7 +491,7 @@ def _handle_zero_probe_radius(
     return np.zeros((0, 3), dtype=dtype_int)
 
 
-@njit(nogil=True, boundscheck=False, cache=True)
+@njit(nogil=True, boundscheck=False, parallel=True, cache=True)
 def _calculate_atom_probe_radii(
     probe_radius: float,
     shrink_factor: float,
@@ -534,10 +516,10 @@ def _calculate_atom_probe_radii(
             - atom_plus_probe_radii_square_1d (np.ndarray): 1D array of (atom_radius + probe_radius)^2.
             - atom_plus_probe_radii_square_shrunk_1d (np.ndarray): 1D array of shrunken squared radii.
     """
-    atom_plus_probe_radii_1d = np.empty(num_atoms, dtype=dtype_real)
-    atom_plus_probe_radii_square_1d = np.empty(num_atoms, dtype=dtype_real)
-    atom_plus_probe_radii_shrink_1d = np.empty(num_atoms, dtype=dtype_real)
-    for i in range(num_atoms):
+    atom_plus_probe_radii_1d = np.zeros(num_atoms, dtype=dtype_real)
+    atom_plus_probe_radii_square_1d = np.zeros(num_atoms, dtype=dtype_real)
+    atom_plus_probe_radii_shrink_1d = np.zeros(num_atoms, dtype=dtype_real)
+    for i in prange(num_atoms):
         atom_plus_probe_radius = dtype_real(
             atoms_data[i][ATOMFIELD_RADIUS] + probe_radius
         )

@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 """
 Utility functions for the pydelphi package, including numerical operations,
@@ -255,9 +238,9 @@ def accumulate_sorted_by_key(
     output_num_cols = 1 + 1 + num_carry_cols  # key + summed_value + carried_cols
     # Here dtype for float is kept to float64 to avoid mapping large (> 10**6) index1d being incorrect due to precision limits.
     if num_rows == 0:
-        return np.empty((0, output_num_cols), dtype=np.float64)
+        return np.zeros((0, output_num_cols), dtype=np.float64)
 
-    output_array = np.empty((num_rows, output_num_cols), dtype=np.float64)
+    output_array = np.zeros((num_rows, output_num_cols), dtype=np.float64)
     output_count = 0
     i = 0
 
@@ -266,12 +249,12 @@ def accumulate_sorted_by_key(
         i += 1
 
     if i >= num_rows:
-        return np.empty((0, output_num_cols), dtype=np.float64)
+        return np.zeros((0, output_num_cols), dtype=np.float64)
 
     # Initialize with the first valid row
     current_key = sorted_data[i, key_col_idx]
     current_value_sum = sorted_data[i, value_col_idx]
-    carried_values = np.empty(num_carry_cols, dtype=np.float64)
+    carried_values = np.zeros(num_carry_cols, dtype=np.float64)
     for k, carry_idx in enumerate(carry_cols_indices):
         carried_values[k] = sorted_data[i, carry_idx]
 

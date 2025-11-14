@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 from math import floor, sqrt, sin, log, exp
 from numba import njit, prange, cuda
@@ -505,7 +488,7 @@ def _cpu_calculate_gaussian_kernel(
     inv_num_minus1 = 1.0 / (num_points - 1)
     step = 2.0 * width * inv_num_minus1
 
-    gaussian_function = np.empty(num_points, dtype=delphi_real)
+    gaussian_function = np.zeros(num_points, dtype=delphi_real)
     kernel_sum = 0.0
 
     for i in range(num_points):

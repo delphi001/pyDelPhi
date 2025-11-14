@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 """
 Voxelizer: Voxelization and Spatial Indexing Utilities.
@@ -130,13 +113,13 @@ def calculate_voxel_space_parameters(
     """
     voxel_padding = delphi_real(scaling_factor * voxel_side_length + voxel_space_offset)
 
-    voxel_space_origin = np.empty(len(coords_by_axis_min), dtype=delphi_real)
+    voxel_space_origin = np.zeros(len(coords_by_axis_min), dtype=delphi_real)
     voxel_space_origin[:] = coords_by_axis_min - voxel_padding
 
-    voxel_space_highest_xyz = np.empty(len(coords_by_axis_max), dtype=delphi_real)
+    voxel_space_highest_xyz = np.zeros(len(coords_by_axis_max), dtype=delphi_real)
     voxel_space_highest_xyz[:] = coords_by_axis_max + voxel_padding
 
-    voxel_space_shape = np.empty(len(coords_by_axis_max), dtype=delphi_int)
+    voxel_space_shape = np.zeros(len(coords_by_axis_max), dtype=delphi_int)
     voxel_space_shape[:] = np.floor(
         (voxel_space_highest_xyz - voxel_space_origin) / voxel_side_length
     ).astype(delphi_int)[:]

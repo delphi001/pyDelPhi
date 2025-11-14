@@ -56,6 +56,16 @@ seaborn
 psutil
 ```
 
+## 🧩 Recommended Environment Setup
+
+To ensure stable operation and avoid dependency conflicts, it is **strongly recommended** to install **pyDelPhi** inside a **dedicated Conda or Miniconda environment**.  
+Use a **versioned environment name** for clarity and reproducibility, for example:
+
+```bash
+conda create -n py312_pydelphi_v0_2_0 python=3.12
+conda activate py312_pydelphi_v0_2_0
+```
+
 ### From Source
 ```bash
 git clone https://github.com/<your-org>/pyDelPhi.git

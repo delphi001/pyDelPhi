@@ -1,9 +1,9 @@
 biomodel=pbe    
 
-surfacemethod=gaussian ! gaussiancutoff
+surfacemethod=gaussian
 surfaceoffset=0.0
 
-dielectricmodel=gaussian ! gaussian ! twodielectric
+dielectricmodel=gaussian
 sigma=1.0
 gaussian_exponent=2
 !density_cutoff=0.759
@@ -14,7 +14,7 @@ scale=2.0
 !percentfill=60
 gridbox_type=cubic
 
-in(modpdb4,file="/home/skp/Documents/GitHub/pydelphi_typed_dev/examples/twoatoms/two-atoms.pqr", format="pqr")                                                                
+in(modpdb4,file="two-atoms.pqr", format="pqr")
 indi=1.0
 exdi=80.0
 boundary_condition=coulombic

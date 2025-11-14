@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides a high-level interface (`PBESolver` class) for solving
@@ -119,6 +101,7 @@ class PBESolver:
         bound_cond: BoundaryCondition,
         dielectric_model: DielectricModel,
         gaussian_exponent: delphi_int,
+        nonlinear_itr_block_size: delphi_int,
         itr_block_size: delphi_int,
         max_linear_iters: delphi_int,
         max_nonlinear_iters: delphi_int,  # New parameter
@@ -138,6 +121,7 @@ class PBESolver:
         check_dphi: delphi_bool,
         epkt: delphi_real,
         approx_zero: delphi_real,
+        omega_adaptive: delphi_real,
         grid_shape: np.ndarray[delphi_int],
         grid_origin: np.ndarray[delphi_real],
         grid_shape_parentrun: np.ndarray[delphi_int],
@@ -198,12 +182,12 @@ class PBESolver:
         """
         phimap_current_1d = None
         if self.solver_name == "sor":
-
             phimap_current_1d = self.solver.solve_nonlinear_pb(
                 vacuum,
                 bound_cond,
                 dielectric_model,
                 gaussian_exponent,
+                nonlinear_itr_block_size,
                 itr_block_size,
                 max_linear_iters,
                 max_nonlinear_iters,
@@ -259,12 +243,12 @@ class PBESolver:
                 check_dphi,
                 epkt,
                 approx_zero,
+                omega_adaptive,
                 grid_shape,
                 grid_origin,
                 grid_shape_parentrun,
                 grid_origin_parentrun,
                 atoms_data,
-                density_map_1d,
                 ion_exclusion_map_1d,
                 epsilon_map_1d,
                 epsmap_midpoints_1d,

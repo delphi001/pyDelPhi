@@ -1,0 +1,23 @@
+biomodel           = pbe
+
+surfacemethod      = gaussian
+dielectricmodel    = gaussian
+
+gaussian_exponent  = 2
+
+scale              = 2
+percentfill        = 70
+gridbox_type       = cubic
+
+indi               = 1.0
+exdi               = 80.0
+gapdi              = 22.0
+
+boundary_condition = coulombic
+salt               = 0.15
+
+linit              = 5000
+max_delta_phi      = 5.0e-4
+
+in(modpdb4,file="5tif.pqr", format="pqr")
+

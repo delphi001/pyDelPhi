@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 import os
 import time
@@ -878,6 +860,7 @@ class DelphiApp:
             )
         else:
             self.ctx.epsilon_map_midpoints_water_1d = space_obj.epsilon_map_midpoints_1d
+
         self.timings.update(space_obj.timings)
         self._write_spatial_maps()
 
@@ -912,9 +895,13 @@ class DelphiApp:
             self.platform,
             self._VERBOSITY,
             n_threads,
-            self.ctx.grid_shape,
-            self.ctx.coulomb_map_1d,
-            self.ctx.grad_coulomb_map_1d,
+            grid_shape=self.ctx.grid_shape,
+            coords_by_axis_min=self.ctx.coords_by_axis_min,
+            coords_by_axis_max=self.ctx.coords_by_axis_max,
+            num_objects=self.ctx.num_objects,
+            num_molecules=1,
+            coulomb_map_1d=self.ctx.coulomb_map_1d,
+            grad_coulomb_map_1d=self.ctx.grad_coulomb_map_1d,
         )
         # Solve RPBE: for the current phase (vacuum or water)
         if self._VERBOSITY <= INFO:
@@ -939,11 +926,13 @@ class DelphiApp:
             exdi=self.inp.get_param_value("exdi"),
             gapdi=self.inp.get_param_value("gapdi"),
             indi=self.inp.get_param_value("indi"),
+            probe_radius=self.inp.get_param_value("probe_radius"),
+            salt_radius=self.inp.get_param_value("ions_radii"),
             debye_length=self.ctx.debye_length,
             total_pve_charge=self.ctx.positive_charge,
             total_nve_charge=self.ctx.negative_charge,
-            max_rms=self.inp.get_param_value("max_rmsd"),
-            max_dphi=self.inp.get_param_value("max_delta_phi"),
+            rms_tol=self.inp.get_param_value("max_rmsd"),
+            dphi_tol=self.inp.get_param_value("max_delta_phi"),
             check_dphi=self.inp.get_param("max_delta_phi").active,
             epkt=self.ctx.epkt,
             approx_zero=self.delphi_real(ConstDelPhi.ApproxZero.value),
@@ -1121,7 +1110,9 @@ class DelphiApp:
 
         if self._VERBOSITY <= DEBUG:
             grid_sz = self.ctx.grid_shape
-            vprint(DEBUG, self._VERBOSITY,
+            vprint(
+                DEBUG,
+                self._VERBOSITY,
                 "ion_exclusion_map_1d_args(mid-x-slice).shape=",
                 ion_exclusion_map_1d_args.shape,
             )
@@ -1148,6 +1139,9 @@ class DelphiApp:
             bound_cond=self.inp.get_param_value("boundary_condition"),
             dielectric_model=self.inp.get_param_value("dielectric_model"),
             gaussian_exponent=self.inp.get_param_value("gaussian_exponent"),
+            nonlinear_itr_block_size=self.inp.get_param_value(
+                "nonlinear_iteration_block_size"
+            ),
             itr_block_size=self.inp.get_param_value("iteration_block_size"),
             max_linear_iters=self.inp.get_param_value("linit"),
             max_nonlinear_iters=self.inp.get_param_value("nonlinit"),
@@ -1169,6 +1163,7 @@ class DelphiApp:
             check_dphi=self.inp.get_param("max_delta_phi").active,
             epkt=self.ctx.epkt,
             approx_zero=self.delphi_real(ConstDelPhi.ApproxZero.value),
+            omega_adaptive=self.inp.get_param_value("nwt_adaptive_omega"),
             grid_shape=self.ctx.grid_shape,
             grid_origin=self.ctx.grid_origin,
             grid_shape_parentrun=self.ctx.grid_shape_parentrun,

@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module defines various constants and enumerations used throughout the Delphi program.
@@ -52,7 +34,7 @@ It includes:
 """
 
 
-from enum import Enum
+from enum import Enum, IntFlag
 from numpy import uint8, int32, array
 from pydelphi.foundation.enumbase import BaseInfoEnum
 from .physical import ConstPhysical  # Import from the local constants package
@@ -324,23 +306,27 @@ class ConstDelPhiInts(Enum):
 
 class BoxGridPointType(Enum):
     """
-    Integer labels assigned to grid points in the simulation box.
+    Bitwise composable uint8 encoding for gridpoint attributes.
+    Used in both CPU and CUDA kernels (bitmask-safe and branch-free).
 
-    These labels are stored in a uint8 property map to categorize grid points
-    for electrostatic calculations.
-
-    - BOUNDARY (255): Box boundary grid point.
-    - INTERIOR (0): Solute/interior grid point.
-    - HOMO_EPSILON (1): Grid point is in a homogeneous dielectric region all
-                          neighboring midpoints have same epsilon.
+    Bit layout (orthogonal, composable):
+        0b00000001 → BOUNDARY        (fixed potential, outer boundary)
+        0b00000010 → IN_SOLUTE_REGION    (inside solute dielectric)
+        0b00000100 → HOMO_EPS_REGION     (uniform dielectric region)
+        0b00001000 → ION_ACCESSIBLE      (solvent; ions present, nonlinear PB region)
+        0b00000000 → UNINITIALIZED       (debug/sentinel for uninitialized maps)
     """
 
-    BOUNDARY = uint8(0)
-    INTERIOR = uint8(1)
-    HOMO_EPSILON = uint8(255)
+    BOUNDARY = uint8(1 << 0)  # pure boundary (default)
+    INTERIOR = uint8(1 << 1)
+    HOMO_EPSILON = uint8(1 << 2)
+    ION_ACCESSIBLE = uint8(1 << 3)
+    NONE = uint8(0)  # sentinel for uninitialized entries
 
 
 # Constants for fast lightweight access in performance-sensitive code
 BOX_BOUNDARY: uint8 = BoxGridPointType.BOUNDARY.value
 BOX_INTERIOR: uint8 = BoxGridPointType.INTERIOR.value
 BOX_HOMO_EPSILON: uint8 = BoxGridPointType.HOMO_EPSILON.value
+BOX_ION_ACCESSIBLE: uint8 = BoxGridPointType.ION_ACCESSIBLE.value
+BOX_NONE: uint8 = BoxGridPointType.NONE.value

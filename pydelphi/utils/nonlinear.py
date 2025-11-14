@@ -17,28 +17,21 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 import numpy as np
 import math
 
-from numba import set_num_threads, njit, prange
+from numba import njit
+
+try:
+    from numba import cuda
+
+    # Check if a CUDA device is actually detected at runtime
+    CUDA_AVAILABLE = cuda.is_available()
+except Exception:
+    # This handles ImportError if numba.cuda isn't installed,
+    # or other issues if the environment is misconfigured.
+    CUDA_AVAILABLE = False
 
 # Assuming these are defined elsewhere in the user's code
 # For demonstration, I'll define them here with example values
@@ -57,13 +50,13 @@ SINH_TAYLOR_COEFFS = np.array(
 )
 
 
-@njit(nogil=True, boundscheck=False, cache=True)
+@njit(inline="always")
 def sinh_taylor_safe(
     phi: float,
-    taylor_cutoff: float = 0.1,
-    clip_cutoff: float = 6.0,
+    taylor_cutoff: float = 4.0,
+    clip_cutoff: float = 5.0,
     n_terms: int = 5,
-    linear_extension_slope: float = 0.1,
+    linear_extension_slope: float = 0.2,
 ) -> float:
     """
     Safe approximation of sinh(phi) using Taylor expansion for intermediate values,
@@ -77,71 +70,107 @@ def sinh_taylor_safe(
         linear_extension_slope: The slope for the linear extension beyond clip_cutoff.
 
     Returns:
-        Approximated sinh(phi), safe for CPU/CUDA use.
+        Approximated sinh(phi), safe for CPU.
     """
     abs_phi = abs(phi)
+    final_result = 0.0
 
+    # 1. Use native sinh for very small values
     if abs_phi < taylor_cutoff:
-        # Return native sinh(phi) for very small values
-        return np.sinh(phi)
-    elif abs_phi < clip_cutoff:
-        # Use Taylor approximation for values between taylor_cutoff and clip_cutoff
-        phi_sq = phi * phi
-        term = phi
-        result = phi
+        final_result = np.sinh(phi)
 
-        max_terms = n_terms
-        if max_terms > MAX_SINH_TAYLOR_TERMS:
-            max_terms = MAX_SINH_TAYLOR_TERMS
-
-        # Taylor series for sinh(x) = x + x^3/3! + x^5/5! + ...
-        # The loop calculates terms phi^(2i+3) and multiplies by 1/(2i+3)!
-        # SINH_FACTOR_TAYLOR_COEFFS_ARRAY should contain 1/3!, 1/5!, etc.
-        for i in prange(
-            max_terms
-        ):  # Use prange for Numba parallelization if applicable
-            term *= phi_sq
-            result += SINH_TAYLOR_COEFFS[i] * term
-
-        return result
+    # 2. Taylor approximation or linear extension
     else:
-        # For |phi| >= clip_cutoff, extend linearly from the value at clip_cutoff.
-        # First, calculate the Taylor approximation at the positive clip_cutoff.
-        # This ensures continuity at the clip_cutoff point.
-        phi_clipped_for_taylor = clip_cutoff
-        phi_sq_clipped = phi_clipped_for_taylor * phi_clipped_for_taylor
-        term_clipped = phi_clipped_for_taylor
-        result_clipped = phi_clipped_for_taylor
+        # Determine the argument for the Taylor calculation (min(|phi|, clip_cutoff))
+        taylor_arg = min(abs_phi, clip_cutoff)
 
+        # Calculate the Taylor series for sinh(taylor_arg)
+        phi_sq = taylor_arg * taylor_arg
+        term = taylor_arg
+        result_taylor = taylor_arg
+
+        # Cap number of terms
         max_terms = n_terms
         if max_terms > MAX_SINH_TAYLOR_TERMS:
             max_terms = MAX_SINH_TAYLOR_TERMS
 
-        for i in prange(
-            max_terms
-        ):  # Use prange for Numba parallelization if applicable
-            term_clipped *= phi_sq_clipped
-            result_clipped += SINH_TAYLOR_COEFFS[i] * term_clipped
+        # Taylor series expansion sum up to given n_terms
+        for i in range(max_terms):
+            # term calculates phi^(2i+3), SINH_TAYLOR_COEFFS[i] is 1/(2i+3)!
+            term *= phi_sq
+            result_taylor += SINH_TAYLOR_COEFFS[i] * term
 
-        value_at_clip_cutoff_positive = result_clipped
-
-        if phi >= 0.0:
-            # Linear extension for positive phi: starting value + slope * distance from cutoff
-            return value_at_clip_cutoff_positive + linear_extension_slope * (
-                phi - clip_cutoff
-            )
+        if abs_phi < clip_cutoff:
+            # Case 2a: abs_phi is in [taylor_cutoff, clip_cutoff). Apply sign.
+            if phi >= 0.0:
+                final_result = result_taylor
+            else:
+                final_result = -result_taylor
         else:
-            # Linear extension for negative phi, maintaining odd function symmetry:
-            # -(starting value + slope * distance from cutoff (using abs_phi))
-            return -(
-                value_at_clip_cutoff_positive
-                + linear_extension_slope * (abs_phi - clip_cutoff)
+            # Case 2b: abs_phi >= clip_cutoff. Apply linear extension.
+
+            value_at_clip_cutoff_positive = result_taylor
+
+            # Calculate the linear extension
+            delta = abs_phi - clip_cutoff
+            positive_extension_value = (
+                value_at_clip_cutoff_positive + linear_extension_slope * delta
             )
 
+            # Apply the original sign of phi
+            if phi >= 0.0:
+                final_result = positive_extension_value
+            else:
+                final_result = -positive_extension_value
 
-@njit(nogil=True, boundscheck=False, cache=True)
-def calc_sinh(phi: float, phi_cutoff: float):
-    if abs(phi) > phi_cutoff:
-        phi = phi_cutoff if phi > 0 else -phi_cutoff
+    return final_result
 
-    return math.sinh(phi)
+
+# Initialize the CUDA function pointer to None by default
+cu_sinh_taylor_safe = None
+
+if CUDA_AVAILABLE:
+
+    @cuda.jit(device=True, inline="always")
+    def cu_sinh_taylor_safe(
+        phi: float,
+        taylor_cutoff: float = 4.0,
+        clip_cutoff: float = 5.0,
+        n_terms: int = 5,
+        linear_extension_slope: float = 0.2,
+    ) -> float:
+        """Explicit CUDA device implementation (cuda.jit(device=True))."""
+        abs_phi = abs(phi)
+        final_result = 0.0
+
+        if abs_phi < taylor_cutoff:
+            final_result = math.sinh(phi)  # Use math.sinh for CUDA
+        else:
+            taylor_arg = min(abs_phi, clip_cutoff)
+
+            phi_sq = taylor_arg * taylor_arg
+            term = taylor_arg
+            result_taylor = taylor_arg
+
+            max_terms = n_terms
+            if max_terms > MAX_SINH_TAYLOR_TERMS:
+                max_terms = MAX_SINH_TAYLOR_TERMS
+
+            # Taylor series expansion
+            for i in range(max_terms):
+                term *= phi_sq
+                result_taylor += SINH_TAYLOR_COEFFS[i] * term
+
+            # Apply sign and linear extension logic
+            value_at_clip_cutoff_positive = result_taylor
+            if abs_phi >= clip_cutoff:
+                delta = abs_phi - clip_cutoff
+                value_at_clip_cutoff_positive += linear_extension_slope * delta
+
+            final_result = (
+                value_at_clip_cutoff_positive
+                if phi >= 0.0
+                else -value_at_clip_cutoff_positive
+            )
+
+        return final_result

@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 import math
 import numpy as np
@@ -612,7 +594,7 @@ def calc_spatial_epsilon_map_midpoints(
     epsilon_gauss_1d = np.zeros(num_grid_points, dtype=delphi_real)
     epsilon_r_1d = np.zeros(num_grid_points, dtype=delphi_real)
 
-    epsilon_r_midpoints_1d = np.empty(num_mid_points, dtype=delphi_real)
+    epsilon_r_midpoints_1d = np.zeros(num_mid_points, dtype=delphi_real)
     epsilon_r_midpoints_1d.fill(epsout)
 
     y_stride: delphi_int = grid_shape[2]
@@ -699,12 +681,12 @@ def calc_gaussian_cutoff_spatial_epsilon_map_midpoints(
     num_mid_points = gauss_density_map_midpoints_1d.shape[0]
     epsout = delphi_real(1.0) if vaccum else exdi
 
-    spatial_outeps_limit = np.empty(2, dtype=delphi_real)
+    spatial_outeps_limit = np.zeros(2, dtype=delphi_real)
     spatial_outeps_limit[0] = exdi
     spatial_outeps_limit[1] = gapdi
 
     epsilon_r_1d = np.full(num_grid_points, fill_value=epsout, dtype=delphi_real)
-    epsilon_r_midpoints_1d = np.empty(num_mid_points, dtype=delphi_real)
+    epsilon_r_midpoints_1d = np.zeros(num_mid_points, dtype=delphi_real)
     epsilon_r_midpoints_1d.fill(epsout)
 
     z_stride: delphi_int = 1
@@ -792,7 +774,7 @@ def calc_gaussian_cutoff_spatial_epsilon_map_midpoints(
                         if not ion_exclusion_map_1d[ijk1d]:
                             ion_exclusion_map_1d[ijk1d] = True
 
-                        neigh_eps = np.empty(6, dtype=delphi_real)
+                        neigh_eps = np.zeros(6, dtype=delphi_real)
                         neigh_eps[0] = epsilon_r_midpoints_1d[ijk1d_x_3]
                         neigh_eps[1] = epsilon_r_midpoints_1d[ijk1d_x_3 + 1]
                         neigh_eps[2] = epsilon_r_midpoints_1d[ijk1d_x_3 + 2]
@@ -1267,7 +1249,7 @@ def calc_grad_surface_map_analytical(
         atoms_data_device = cuda.to_device(atoms_data)
         densitymap_gridpoints_1d_device = cuda.to_device(densitymap_gridpoints_1d)
         surface_map_1d_device = cuda.to_device(surface_map_1d)
-        grad_surface_map_1d_device = cuda.device_array_like(grad_surface_map_1d)
+        grad_surface_map_1d_device = cuda.to_device(grad_surface_map_1d)
 
         _cuda_calc_grad_surface_map_analytical[num_blocks, num_cuda_threads](
             gaussian_exponent,
@@ -1313,7 +1295,7 @@ def calc_gaussian_like_surface(
             gauss_density_solvent_1d.size + num_cuda_threads - 1
         ) // num_cuda_threads
         gauss_density_solvent_1d_device = cuda.to_device(gauss_density_solvent_1d)
-        surface_map_1d_device = cuda.device_array_like(surface_map_1d)
+        surface_map_1d_device = cuda.to_device(surface_map_1d)
         _cuda_calc_gaussian_like_surface[num_blocks, num_cuda_threads](
             surf_den_exp_scaled,
             delphi_real(APPROX_ZERO),  # Ensure approx_zero is correct type

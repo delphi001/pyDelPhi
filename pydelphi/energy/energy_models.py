@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module defines data structures for configuring and storing results of energy calculations.
@@ -346,7 +328,7 @@ class EnergyResults:
                 for component_txt, component_time in phase_timings.items():
                     if component_time is not None:
                         timing_lines.append(
-                            f"{indent}{field_format.format(timing_tag + component_txt.replace("_", " "))} : {component_time:13.3f} s"
+                            f"{indent}{field_format.format(timing_tag + component_txt.replace('_', ' '))} : {component_time:13.3f} s"
                         )
             if nonlinear_time > 1.0e-1:
                 timing_lines.append(
@@ -383,7 +365,7 @@ class EnergyResults:
                 for component_txt, component_time in phase_timings.items():
                     if component_time is not None:
                         timing_lines.append(
-                            f"{indent}{field_format.format(timing_tag + component_txt.replace("_", " "))} : {component_time:13.3f} s"
+                            f"{indent}{field_format.format(timing_tag + component_txt.replace('_', ' '))} : {component_time:13.3f} s"
                         )
             nonlinear_time = self.get_timing("water", "nonlinear_pb_terms")
             if nonlinear_time is not None and nonlinear_time > 1.0e-1:

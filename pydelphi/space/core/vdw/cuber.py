@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 Module for creating and populating a 3D cubic grid from atomic data.
@@ -102,13 +84,13 @@ def setup_cube(
     """
     cube_padding = delphi_real(scaling_factor * cube_side_length + cube_extrema_offset)
 
-    cube_vertex_lowest_xyz = np.empty(len(coords_by_axis_min), dtype=delphi_real)
+    cube_vertex_lowest_xyz = np.zeros(len(coords_by_axis_min), dtype=delphi_real)
     cube_vertex_lowest_xyz[:] = coords_by_axis_min - cube_padding
 
-    cube_vertex_highest_xyz = np.empty(len(coords_by_axis_max), dtype=delphi_real)
+    cube_vertex_highest_xyz = np.zeros(len(coords_by_axis_max), dtype=delphi_real)
     cube_vertex_highest_xyz[:] = coords_by_axis_max + cube_padding
 
-    cube_shape = np.empty(len(coords_by_axis_max), dtype=delphi_int)
+    cube_shape = np.zeros(len(coords_by_axis_max), dtype=delphi_int)
     cube_shape[:] = np.floor(
         (cube_vertex_highest_xyz - cube_vertex_lowest_xyz) / cube_side_length
     ).astype(delphi_int)[:]

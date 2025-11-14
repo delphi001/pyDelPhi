@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 import math
 import numpy as np
@@ -218,7 +201,9 @@ def _cuda_calc_coulombic_energy(
     total_threads = blocks * threads_per_block
 
     # Allocate device array for partial energy per thread (size = total_threads)
-    energy_block_device = cuda.device_array(shape=(total_threads,), dtype=np.float64)
+    energy_block_device = cuda.to_device(
+        np.zeros(shape=(total_threads,), dtype=np.float64)
+    )
 
     # Launch kernel: each thread computes contributions for some i's in grid-stride
     _cuda_coulombic_energy_kernel_soa[blocks, threads_per_block](
@@ -271,7 +256,7 @@ def calc_coulombic_energy(
             raise RuntimeError("CUDA selected but no devices available.")
 
         # Prepare compact (n,4) array on host (fast)
-        atoms_data_slice_xyzq = np.empty((n_atoms, LEN_XYZCHARGE), dtype=delphi_real)
+        atoms_data_slice_xyzq = np.zeros((n_atoms, LEN_XYZCHARGE), dtype=delphi_real)
         _slice_atoms_xyzq_for_cuda(
             n_atoms, atoms_data_cast, atoms_data_slice_xyzq, dtype_real=delphi_real
         )

@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module implements iterative relaxation methods for solving Poisson-like equations
@@ -46,7 +28,7 @@ and provides both CPU and CUDA implementations for core iteration routines.
 
 import numpy as np
 
-from numba import njit, prange, cuda
+from numba import njit, prange, cuda, float64
 from math import sin, sqrt
 
 from pydelphi.foundation.enums import Precision
@@ -59,7 +41,6 @@ from pydelphi.config.global_runtime import (
 
 from pydelphi.constants import (
     BOX_BOUNDARY,
-    BOX_INTERIOR,
     BOX_HOMO_EPSILON,
     XYZ_COMPONENTS,
     HALF_GRID_OFFSET_LAGGING,
@@ -85,6 +66,7 @@ elif precision == Precision.DOUBLE.int_value:
     except ImportError:
         pass
 
+BLOCK_SIZE = 1024  # safe across all GPUs
 
 # --- Core Iteration Functions ---
 
@@ -161,7 +143,7 @@ def _cpu_iterate_relaxation_factor(
                 if ijk1d >= num_grid_points:
                     continue
 
-                if is_boundary_gridpoint_1d[ijk1d] != BOX_BOUNDARY:
+                if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
                     epsilon_sum_local = epsilon_sum_neighbors_1d[ijk1d]
                     eps_k_minus_half = epsilon_map_midpoints_1d[
                         ijk1d_x_3 - HALF_GRID_OFFSET_LAGGING
@@ -248,7 +230,7 @@ def _cuda_iterate_relaxation_factor(
     ijk1d_x_3 = ijk1d * XYZ_COMPONENTS
 
     if ijk1d < num_grid_points:  # Boundary check
-        if is_boundary_gridpoint_1d[ijk1d] != BOX_BOUNDARY:
+        if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
             epsilon_sum_local = epsilon_sum_neighbors_1d[
                 ijk1d
             ]  # Sum of epsilons for neighbors
@@ -295,10 +277,227 @@ def _cuda_iterate_relaxation_factor(
             )  # Update phi value
 
 
+# -------------------------------
+# CUDA kernel
+# -------------------------------
+@cuda.jit(cache=True)
+def _cuda_reset_rmsd_and_dphi(sum_sq_out, max_change_out):
+    """
+    Zero out global accumulators for RMSD (ΣΔφ²) and maximum potential change (Δφ_max)
+    on the device before any SOR iteration block that performs atomic reductions.
+
+    ⚠️ Must be called immediately before `_cuda_iterate_SOR_odd_with_dphi_rmsd`
+    to ensure the global accumulators start from zero for each block.
+
+    This kernel is single-threaded and operates entirely on device memory, avoiding
+    PCIe round-trips. Typically launched as: `_cuda_reset_rmsd_and_dphi[1, 1](...)`.
+
+    Args:
+        sum_sq_out (float64[1]): Device scalar accumulator for RMSD (sum of squared Δφ).
+        max_change_out (float64[1]): Device scalar accumulator for maximum Δφ magnitude.
+
+    Mutates:
+        sum_sq_out: Reset in place to 0.0.
+        max_change_out: Reset in place to 0.0.
+    """
+    if cuda.threadIdx.x == 0:
+        sum_sq_out[0] = 0.0
+        max_change_out[0] = 0.0
+
+
+@cuda.jit(cache=True)
+def _cuda_iterate_SOR_odd_with_dphi_rmsd(
+    even_odd: delphi_int,
+    omega_sor: delphi_real,
+    approx_zero: delphi_real,
+    grid_shape: np.ndarray[delphi_int],
+    phi_map_current_half_1d: np.ndarray[delphi_real],
+    phi_map_next_half_1d: np.ndarray[delphi_real],
+    epsilon_map_midpoints_1d: np.ndarray[delphi_real],
+    epsilon_sum_neighbors_plus_salt_screening_1d: np.ndarray[delphi_real],
+    is_boundary_gridpoint_1d: np.ndarray[delphi_bool],
+    charge_map_1d: np.ndarray[delphi_real],
+    sum_sq_out,  # float64[1]
+    max_change_out,  # float64[1]
+):
+    """
+    CUDA kernel for the **odd half-iteration** of the linear Successive Over-Relaxation (SOR) solver.
+    In addition to potential updates, this kernel computes per-thread Δφ statistics and performs
+    block-level reductions into global accumulators for RMSD and maximum potential change.
+
+    ⚠️ IMPORTANT:
+        `_cuda_reset_rmsd_and_dphi()` **must be launched immediately beforehand**
+        to zero the accumulators `sum_sq_out` and `max_change_out`. Failure to do so
+        will cause accumulation across blocks and incorrect diagnostics.
+
+    Args:
+        even_odd (delphi_int): 0 for even iteration, 1 for odd iteration.
+        omega_sor (delphi_real): Over-relaxation factor (SOR relaxation parameter).
+        approx_zero (delphi_real): Threshold for neglecting near-zero charge densities.
+        grid_shape (np.ndarray[delphi_int]): Dimensions of the 3D grid (nx, ny, nz).
+        phi_map_current_half_1d (np.ndarray[delphi_real]): Potential array for the current half-grid.
+        phi_map_next_half_1d (np.ndarray[delphi_real]): Potential array to be updated (target half-grid).
+        epsilon_map_midpoints_1d (np.ndarray[delphi_real]): Dielectric constants at grid midpoints.
+        epsilon_sum_neighbors_plus_salt_screening_1d (np.ndarray[delphi_real]): Precomputed denominator
+            term (Σε_neighbor + κ²h²ε_center) for each grid point.
+        is_boundary_gridpoint_1d (np.ndarray[delphi_bool]): Boundary condition flags per grid point.
+        charge_map_1d (np.ndarray[delphi_real]): Charge density map in units of kT/e per voxel.
+        sum_sq_out (float64[1]): Device accumulator for RMSD (ΣΔφ²).
+        max_change_out (float64[1]): Device accumulator for maximum |Δφ|.
+
+    Mutates:
+        phi_map_next_half_1d: Updated in place with new φ values for this half-iteration.
+        sum_sq_out: Updated atomically (ΣΔφ²).
+        max_change_out: Updated atomically with maximum |Δφ|.
+    """
+
+    # shared memory (two arrays)
+    shared_sq = cuda.shared.array(BLOCK_SIZE, float64)
+    shared_max = cuda.shared.array(BLOCK_SIZE, float64)
+
+    tid = cuda.threadIdx.x
+    idx = cuda.grid(1)
+    stride = cuda.gridsize(1)
+
+    # derived constants
+    nx, ny, nz = grid_shape
+    y_stride = nz
+    x_stride = ny * y_stride
+    num_grid_points = nx * x_stride
+    num_grid_points_half = (num_grid_points + 1) // 2
+    omega_old_weight = 1.0 - omega_sor
+
+    # even/odd dependent offsets
+    if even_odd == 0:
+        z_stride_half_leading_offset = HALF_GRID_OFFSET_LEADING
+        z_stride_half_lagging_offset = HALF_GRID_OFFSET_LAGGING
+        y_stride_half_leading_offset = y_stride // 2
+        y_stride_half_lagging_offset = y_stride_half_leading_offset + 1
+        x_stride_half_leading_offset = x_stride // 2
+        x_stride_half_lagging_offset = x_stride_half_leading_offset + 1
+    else:
+        z_stride_half_leading_offset = HALF_GRID_OFFSET_LAGGING
+        z_stride_half_lagging_offset = HALF_GRID_OFFSET_LEADING
+        y_stride_half_leading_offset = y_stride // 2 + 1
+        y_stride_half_lagging_offset = y_stride // 2
+        x_stride_half_leading_offset = x_stride // 2 + 1
+        x_stride_half_lagging_offset = x_stride // 2
+
+    # thread-local accumulators
+    local_sq = 0.0
+    local_max = 0.0
+
+    # -------------------------------
+    # Main half-iteration loop
+    # -------------------------------
+    for ijk1d_half in range(idx, num_grid_points_half, stride):
+        ijk1d = 2 * ijk1d_half + even_odd
+        if ijk1d < num_grid_points:
+            if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
+                ijk1d_x_3 = ijk1d * XYZ_COMPONENTS
+
+                eps_sum_local = epsilon_sum_neighbors_plus_salt_screening_1d[ijk1d]
+                phi_k_minus_1 = phi_map_current_half_1d[
+                    ijk1d_half - z_stride_half_lagging_offset
+                ]
+                phi_k_plus_1 = phi_map_current_half_1d[
+                    ijk1d_half + z_stride_half_leading_offset
+                ]
+                phi_j_minus_1 = phi_map_current_half_1d[
+                    ijk1d_half - y_stride_half_lagging_offset
+                ]
+                phi_j_plus_1 = phi_map_current_half_1d[
+                    ijk1d_half + y_stride_half_leading_offset
+                ]
+                phi_i_minus_1 = phi_map_current_half_1d[
+                    ijk1d_half - x_stride_half_lagging_offset
+                ]
+                phi_i_plus_1 = phi_map_current_half_1d[
+                    ijk1d_half + x_stride_half_leading_offset
+                ]
+
+                if is_boundary_gridpoint_1d[ijk1d] & BOX_HOMO_EPSILON:
+                    eps = epsilon_map_midpoints_1d[ijk1d_x_3]
+                    phi_sum = (
+                        phi_k_minus_1
+                        + phi_k_plus_1
+                        + phi_j_minus_1
+                        + phi_j_plus_1
+                        + phi_i_minus_1
+                        + phi_i_plus_1
+                    )
+                    numerator = eps * phi_sum
+                else:
+                    eps_k_minus_half = epsilon_map_midpoints_1d[
+                        ijk1d_x_3 - HALF_GRID_OFFSET_LAGGING
+                    ]
+                    eps_k_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3 + 2]
+                    eps_j_minus_half = epsilon_map_midpoints_1d[
+                        ijk1d_x_3 - (y_stride * XYZ_COMPONENTS - 1)
+                    ]
+                    eps_j_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3 + 1]
+                    eps_i_minus_half = epsilon_map_midpoints_1d[
+                        ijk1d_x_3 - (x_stride * XYZ_COMPONENTS)
+                    ]
+                    eps_i_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3]
+                    numerator = (
+                        phi_k_minus_1 * eps_k_minus_half
+                        + phi_k_plus_1 * eps_k_plus_half
+                        + phi_j_minus_1 * eps_j_minus_half
+                        + phi_j_plus_1 * eps_j_plus_half
+                        + phi_i_minus_1 * eps_i_minus_half
+                        + phi_i_plus_1 * eps_i_plus_half
+                    )
+
+                denom = eps_sum_local
+                charge_density = charge_map_1d[ijk1d]
+                old_phi = phi_map_next_half_1d[ijk1d_half]
+
+                if math.fabs(charge_density) > approx_zero:
+                    updated_phi = omega_old_weight * old_phi + (
+                        omega_sor * (numerator + charge_density) / denom
+                    )
+                else:
+                    updated_phi = omega_old_weight * old_phi + (
+                        omega_sor * numerator / denom
+                    )
+
+                # store updated φ
+                phi_map_next_half_1d[ijk1d_half] = updated_phi
+
+                # local stats
+                diff = updated_phi - old_phi
+                local_sq += diff * diff
+                abs_diff = math.fabs(diff)
+                if abs_diff > local_max:
+                    local_max = abs_diff
+
+    # -------------------------------
+    # Block-level reduction
+    # -------------------------------
+    shared_sq[tid] = local_sq
+    shared_max[tid] = local_max
+    cuda.syncthreads()
+
+    s = cuda.blockDim.x // 2
+    while s > 0:
+        if tid < s:
+            shared_sq[tid] += shared_sq[tid + s]
+            if shared_max[tid + s] > shared_max[tid]:
+                shared_max[tid] = shared_max[tid + s]
+        s //= 2
+        cuda.syncthreads()
+
+    # Write block result to global atomics
+    if tid == 0:
+        cuda.atomic.add(sum_sq_out, 0, shared_sq[0])
+        cuda.atomic.max(max_change_out, 0, shared_max[0])
+
+
 @cuda.jit(cache=True)
 def _cuda_iterate_SOR(
     even_odd: delphi_int,
-    omega: delphi_real,
+    omega_sor: delphi_real,
     approx_zero: delphi_real,
     grid_shape: np.ndarray[delphi_int],
     phi_map_current_half_1d: np.ndarray[delphi_real],
@@ -309,19 +508,46 @@ def _cuda_iterate_SOR(
     charge_map_1d: np.ndarray[delphi_real],
 ) -> None:
     """
-    CUDA kernel for Successive Over-Relaxation (SOR) iteration.
+    CUDA kernel for one half-step of the **linear Successive Over-Relaxation (SOR)** update.
+
+    This kernel updates potential values (φ) on either the even or odd half-grid, depending
+    on `even_odd`. It performs the classical SOR stencil computation, reading potentials
+    from the opposite half-grid (`phi_map_current_half_1d`) and writing updated values to
+    the target half-grid (`phi_map_next_half_1d`).
+
+    ⚙️ Behavior:
+        • Reads dielectric coefficients and charge densities to compute local φ updates.
+        • Skips boundary gridpoints (BOX_BOUNDARY) to preserve boundary conditions.
+        • Handles homogeneous (BOX_HOMO_EPSILON) and inhomogeneous dielectric regions.
+        • Performs no global accumulation — use `_cuda_iterate_SOR_odd_with_dphi_rmsd`
+          when RMSD/Δφ diagnostics are required.
 
     Args:
-        even_odd (delphi_int): Flag for even/odd iterations.
-        omega (delphi_real): Over-relaxation factor.
-        approx_zero (delphi_real): Threshold to consider charge density as zero.
-        grid_shape (np.ndarray[delphi_int]): Shape of the 3D grid.
-        phi_map_current_half_1d (np.ndarray[delphi_real]): Current phi values (odd or even half).
-        phi_map_next_half_1d (np.ndarray[delphi_real]): Next phi values (even or odd half).
-        epsilon_map_midpoints_1d (np.ndarray[delphi_real]): Epsilon values at midpoints.
-        epsilon_sum_neighbors_plus_salt_screening_1d (np.ndarray[delphi_real]): Sum of epsilons for neighbors.
-        is_boundary_gridpoint_1d (np.ndarray[delphi_bool]): Boundary grid point flags.
-        charge_map_1d (np.ndarray[delphi_real]): Charge density map.
+        even_odd (delphi_int):
+            Flag selecting which half-grid to update (0 = even, 1 = odd).
+        omega_sor (delphi_real):
+            Over-relaxation factor controlling convergence rate (typically 1.5–1.9).
+        approx_zero (delphi_real):
+            Threshold below which a charge density is considered negligible.
+        grid_shape (np.ndarray[delphi_int]):
+            Shape of the 3D grid (nx, ny, nz) defining iteration limits.
+        phi_map_current_half_1d (np.ndarray[delphi_real]):
+            Potential values for the currently stable half (read source).
+        phi_map_next_half_1d (np.ndarray[delphi_real]):
+            Potential values for the half being updated (write target).
+        epsilon_map_midpoints_1d (np.ndarray[delphi_real]):
+            Dielectric constant values at grid midpoints (flattened array of size 3×N).
+        epsilon_sum_neighbors_plus_salt_screening_1d (np.ndarray[delphi_real]):
+            Precomputed denominator term (Σ ε_neighbor + κ²h²ε_center) for each gridpoint.
+        is_boundary_gridpoint_1d (np.ndarray[delphi_bool]):
+            Per-voxel boundary flags: BOX_BOUNDARY, BOX_HOMO_EPSILON, etc.
+        charge_map_1d (np.ndarray[delphi_real]):
+            Charge density (ρ) at each gridpoint, in kT/e per voxel.
+
+    Mutates:
+        phi_map_next_half_1d:
+            Updated in place with new φ values for the active half-grid.
+            (Boundary points are skipped and remain unchanged.)
     """
     nx, ny, nz = grid_shape
     y_stride = nz
@@ -352,7 +578,7 @@ def _cuda_iterate_SOR(
 
     num_grid_points = nx * x_stride
 
-    one_minus_omega = 1.0 - omega.item()  # Pre-calculate (1 - omega)
+    omega_old_weight = 1.0 - omega_sor.item()  # Pre-calculate (1 - omega)
 
     ijk1d_half = cuda.grid(1)  # Get CUDA grid index
     ijk1d = 2 * ijk1d_half + even_odd.item()  # Convert half index to full index
@@ -360,7 +586,7 @@ def _cuda_iterate_SOR(
 
     if ijk1d < num_grid_points:  # Grid array bounds check
         # Apply SOR only to non-boundary points
-        if is_boundary_gridpoint_1d[ijk1d] != BOX_BOUNDARY:
+        if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
             epsilon_sum_local = epsilon_sum_neighbors_plus_salt_screening_1d[
                 ijk1d
             ]  # Sum of neighbor epsilons
@@ -381,7 +607,7 @@ def _cuda_iterate_SOR(
 
             numerator = 0.0  # ensure defined regardless of branching
             # Calculate numerator for SOR update
-            if is_boundary_gridpoint_1d[ijk1d] == BOX_HOMO_EPSILON:
+            if is_boundary_gridpoint_1d[ijk1d] & BOX_HOMO_EPSILON:
                 eps = epsilon_map_midpoints_1d[ijk1d_x_3]
                 phi_sum = (
                     phi_k_minus_1
@@ -422,19 +648,20 @@ def _cuda_iterate_SOR(
                 abs(charge_density) > approx_zero.item()
             ):  # Check if charge density is significant
                 phi_map_next_half_1d[ijk1d_half] = (
-                    omega.item() * phi_map_next_half_1d[ijk1d_half]
-                    + one_minus_omega * (numerator + charge_density) / denominator
+                    omega_old_weight * phi_map_next_half_1d[ijk1d_half]
+                    + omega_sor.item() * (numerator + charge_density) / denominator
                 )
             else:  # If charge density is negligible
-                phi_map_next_half_1d[ijk1d_half] = omega.item() * phi_map_next_half_1d[
-                    ijk1d_half
-                ] + one_minus_omega * (numerator / denominator)
+                phi_map_next_half_1d[ijk1d_half] = (
+                    omega_old_weight * phi_map_next_half_1d[ijk1d_half]
+                    + omega_sor.item() * (numerator / denominator)
+                )
 
 
 @njit(nogil=True, boundscheck=False, parallel=True, cache=True)
 def _cpu_iterate_SOR(
     even_odd: delphi_int,
-    omega: delphi_real,
+    omega_sor: delphi_real,
     approx_zero: delphi_real,
     grid_shape: np.ndarray[delphi_int],
     phi_map_current_half_1d: np.ndarray[delphi_real],
@@ -449,7 +676,7 @@ def _cpu_iterate_SOR(
 
     Args:
         even_odd (delphi_int): Flag for even/odd iterations.
-        omega (delphi_real): Over-relaxation factor.
+        omega_sor (delphi_real): Over-relaxation factor.
         approx_zero (delphi_real): Threshold for negligible charge density.
         grid_shape (np.ndarray[delphi_int]): Shape of the 3D grid.
         phi_map_current_half_1d (np.ndarray[delphi_real]): Current phi values (odd or even half).
@@ -488,7 +715,7 @@ def _cpu_iterate_SOR(
     num_grid_points = nx * x_stride
     num_grid_points_half = (num_grid_points + 1) // 2
 
-    one_minus_omega = 1 - omega  # Pre-calculate (1 - omega)
+    omega_old_weight = 1 - omega_sor  # Pre-calculate (1 - omega)
 
     for ijk1d_half in prange(
         num_grid_points_half
@@ -498,7 +725,7 @@ def _cpu_iterate_SOR(
             ijk1d_x_3 = ijk1d * XYZ_COMPONENTS
 
             # Apply SOR only to non-boundary points
-            if is_boundary_gridpoint_1d[ijk1d] != BOX_BOUNDARY:
+            if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
                 epsilon_sum_local = epsilon_sum_neighbors_plus_salt_screening_1d[
                     ijk1d
                 ]  # Sum of neighbor epsilons
@@ -518,7 +745,7 @@ def _cpu_iterate_SOR(
                 )
 
                 numerator = 0.0  # ensure defined regardless of branching
-                if is_boundary_gridpoint_1d[ijk1d] == BOX_HOMO_EPSILON:
+                if is_boundary_gridpoint_1d[ijk1d] & BOX_HOMO_EPSILON:
                     eps = epsilon_map_midpoints_1d[ijk1d_x_3]
                     phi_sum = (
                         phi_k_minus_1
@@ -559,76 +786,168 @@ def _cpu_iterate_SOR(
 
                 # Apply SOR update, considering charge density if it is significant
                 if abs(charge_density) > approx_zero:
-                    updated_phi = omega * phi_map_next_half_1d[ijk1d_half] + (
-                        one_minus_omega * (numerator + charge_density) / denominator
-                    )
+                    updated_phi = omega_old_weight * phi_map_next_half_1d[
+                        ijk1d_half
+                    ] + (omega_sor * (numerator + charge_density) / denominator)
                 else:  # If charge density is negligible
-                    updated_phi = omega * phi_map_next_half_1d[ijk1d_half] + (
-                        one_minus_omega * numerator / denominator
-                    )
+                    updated_phi = omega_old_weight * phi_map_next_half_1d[
+                        ijk1d_half
+                    ] + (omega_sor * numerator / denominator)
                 phi_map_next_half_1d[ijk1d_half] = updated_phi  # Update phi value
 
 
-def _cpu_iterate_block_SOR(
-    iterations: delphi_int,
-    iteration_block_size: delphi_int,
-    omega: delphi_real,
+@njit(nogil=True, boundscheck=False, parallel=True, cache=True)
+def _cpu_iterate_SOR_odd_with_dphi_rmsd(
+    num_cpu_threads,
+    even_odd: delphi_int,
+    omega_sor: delphi_real,
     approx_zero: delphi_real,
     grid_shape: np.ndarray[delphi_int],
-    phi_map_odds_1d: np.ndarray[delphi_real],
-    phi_map_even_1d: np.ndarray[delphi_real],
+    phi_map_current_half_1d: np.ndarray[delphi_real],
+    phi_map_next_half_1d: np.ndarray[delphi_real],
     epsilon_map_midpoints_1d: np.ndarray[delphi_real],
     epsilon_sum_neighbors_plus_salt_screening_1d: np.ndarray[delphi_real],
     is_boundary_gridpoint_1d: np.ndarray[delphi_bool],
     charge_map_1d: np.ndarray[delphi_real],
-) -> None:
+) -> tuple[delphi_real, delphi_real]:
     """
-    CPU function to perform SOR iteration for a block of iterations,
-    alternating between even and odd grid point updates.
+    Parallel SOR iteration with per-thread reduction for RMSD and max Δφ.
+    Safe version — no thread_id calls, deterministic chunking.
+    """
+    nx, ny, nz = grid_shape
+    y_stride = nz
+    x_stride = ny * y_stride
+    y_stride_x_3 = y_stride * XYZ_COMPONENTS
+    x_stride_x_3 = x_stride * XYZ_COMPONENTS
+    y_stride_x_3_minus_1 = y_stride_x_3 - 1
+    y_stride_half = y_stride // 2
+    x_stride_half = x_stride // 2
 
-    Args:
-        iterations (delphi_int): Starting iteration number.
-        iteration_block_size (delphi_int): Number of iterations in the block.
-        omega (delphi_real): Over-relaxation factor.
-        approx_zero (delphi_real): Threshold for negligible charge density.
-        grid_shape (np.ndarray[delphi_int]): Shape of the 3D grid.
-        phi_map_odds_1d (np.ndarray[delphi_real]): Phi values for odd grid points.
-        phi_map_even_1d (np.ndarray[delphi_real]): Phi values for even grid points.
-        epsilon_map_midpoints_1d (np.ndarray[delphi_real]): Epsilon values at midpoints.
-        epsilon_sum_neighbors_plus_salt_screening_1d (np.ndarray[delphi_real]): Sum of epsilons for neighbors.
-        is_boundary_gridpoint_1d (np.ndarray[delphi_bool]): Boundary grid point flags.
-        charge_map_1d (np.ndarray[delphi_real]): Charge density map.
-    """
-    for iteration_number in range(
-        iterations + 1, iterations + iteration_block_size + 1
-    ):  # Iterate for block size
-        for even_odd_flag in [0, 1]:  # Iterate over even and odd points
-            if even_odd_flag == 0:
-                _cpu_iterate_SOR(
-                    even_odd_flag,
-                    omega,
-                    approx_zero,
-                    grid_shape,
-                    phi_map_odds_1d,
-                    phi_map_even_1d,
-                    epsilon_map_midpoints_1d,
-                    epsilon_sum_neighbors_plus_salt_screening_1d,
-                    is_boundary_gridpoint_1d,
-                    charge_map_1d,
+    if even_odd == 0:
+        z_stride_half_leading_offset = HALF_GRID_OFFSET_LEADING
+        z_stride_half_lagging_offset = HALF_GRID_OFFSET_LAGGING
+        y_stride_half_leading_offset = y_stride_half
+        y_stride_half_lagging_offset = y_stride_half + 1
+        x_stride_half_leading_offset = x_stride_half
+        x_stride_half_lagging_offset = x_stride_half + 1
+    else:
+        z_stride_half_leading_offset = HALF_GRID_OFFSET_LAGGING
+        z_stride_half_lagging_offset = HALF_GRID_OFFSET_LEADING
+        y_stride_half_leading_offset = y_stride_half + 1
+        y_stride_half_lagging_offset = y_stride_half
+        x_stride_half_leading_offset = x_stride_half + 1
+        x_stride_half_lagging_offset = x_stride_half
+
+    num_grid_points = nx * x_stride
+    num_grid_points_half = (num_grid_points + 1) // 2
+    omega_old_weight = 1.0 - omega_sor
+
+    # num_cpu_threads = numba.get_num_threads()
+    local_sum_sq = np.zeros(num_cpu_threads, dtype=delphi_real)
+    local_max_change = np.zeros(num_cpu_threads, dtype=delphi_real)
+
+    # Precompute chunking
+    chunk = (num_grid_points_half + num_cpu_threads - 1) // num_cpu_threads
+
+    for t in prange(num_cpu_threads):
+        start = t * chunk
+        end = min(start + chunk, num_grid_points_half)
+
+        sum_sq = 0.0
+        max_dphi = 0.0
+
+        for ijk1d_half in range(start, end):
+            ijk1d = 2 * ijk1d_half + even_odd
+            if ijk1d >= num_grid_points:
+                break
+
+            if (is_boundary_gridpoint_1d[ijk1d] & BOX_BOUNDARY) == BOX_BOUNDARY:
+                continue
+
+            ijk1d_x_3 = ijk1d * XYZ_COMPONENTS
+            epsilon_sum_local = epsilon_sum_neighbors_plus_salt_screening_1d[ijk1d]
+            charge_density = charge_map_1d[ijk1d]
+
+            phi_k_minus_1 = phi_map_current_half_1d[
+                ijk1d_half - z_stride_half_lagging_offset
+            ]
+            phi_k_plus_1 = phi_map_current_half_1d[
+                ijk1d_half + z_stride_half_leading_offset
+            ]
+            phi_j_minus_1 = phi_map_current_half_1d[
+                ijk1d_half - y_stride_half_lagging_offset
+            ]
+            phi_j_plus_1 = phi_map_current_half_1d[
+                ijk1d_half + y_stride_half_leading_offset
+            ]
+            phi_i_minus_1 = phi_map_current_half_1d[
+                ijk1d_half - x_stride_half_lagging_offset
+            ]
+            phi_i_plus_1 = phi_map_current_half_1d[
+                ijk1d_half + x_stride_half_leading_offset
+            ]
+
+            if is_boundary_gridpoint_1d[ijk1d] & BOX_HOMO_EPSILON:
+                eps = epsilon_map_midpoints_1d[ijk1d_x_3]
+                numerator = eps * (
+                    phi_k_minus_1
+                    + phi_k_plus_1
+                    + phi_j_minus_1
+                    + phi_j_plus_1
+                    + phi_i_minus_1
+                    + phi_i_plus_1
                 )
-            elif even_odd_flag == 1:
-                _cpu_iterate_SOR(
-                    even_odd_flag,
-                    omega,
-                    approx_zero,
-                    grid_shape,
-                    phi_map_even_1d,
-                    phi_map_odds_1d,
-                    epsilon_map_midpoints_1d,
-                    epsilon_sum_neighbors_plus_salt_screening_1d,
-                    is_boundary_gridpoint_1d,
-                    charge_map_1d,
+            else:
+                eps_k_minus_half = epsilon_map_midpoints_1d[
+                    ijk1d_x_3 - HALF_GRID_OFFSET_LAGGING
+                ]
+                eps_k_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3 + 2]
+                eps_j_minus_half = epsilon_map_midpoints_1d[
+                    ijk1d_x_3 - y_stride_x_3_minus_1
+                ]
+                eps_j_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3 + 1]
+                eps_i_minus_half = epsilon_map_midpoints_1d[ijk1d_x_3 - x_stride_x_3]
+                eps_i_plus_half = epsilon_map_midpoints_1d[ijk1d_x_3]
+                numerator = (
+                    phi_k_minus_1 * eps_k_minus_half
+                    + phi_k_plus_1 * eps_k_plus_half
+                    + phi_j_minus_1 * eps_j_minus_half
+                    + phi_j_plus_1 * eps_j_plus_half
+                    + phi_i_minus_1 * eps_i_minus_half
+                    + phi_i_plus_1 * eps_i_plus_half
                 )
+
+            prev_phi = phi_map_next_half_1d[ijk1d_half]
+            if abs(charge_density) > approx_zero:
+                new_phi = (
+                    omega_old_weight * prev_phi
+                    + omega_sor * (numerator + charge_density) / epsilon_sum_local
+                )
+            else:
+                new_phi = (
+                    omega_old_weight * prev_phi
+                    + omega_sor * numerator / epsilon_sum_local
+                )
+
+            phi_map_next_half_1d[ijk1d_half] = new_phi
+
+            dphi = new_phi - prev_phi
+            sum_sq += dphi * dphi
+            adphi = abs(dphi)
+            if adphi > max_dphi:
+                max_dphi = adphi
+
+        local_sum_sq[t] = sum_sq
+        local_max_change[t] = max_dphi
+
+    total_sum_sq = 0.0
+    global_max_change = 0.0
+    for t in range(num_cpu_threads):
+        total_sum_sq += local_sum_sq[t]
+        if local_max_change[t] > global_max_change:
+            global_max_change = local_max_change[t]
+
+    return total_sum_sq, global_max_change
 
 
 # --- Phi Map Initialization Functions ---

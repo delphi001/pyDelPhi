@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides functions for calculating reaction field energy, which
@@ -77,7 +59,9 @@ from pydelphi.config.global_runtime import (
     vprint,
 )
 
-from pydelphi.config.logging_config import DEBUG, get_effective_verbosity, INFO
+from pydelphi.config.logging_config import (
+    DEBUG, INFO, VERBOSE, get_effective_verbosity,
+)
 
 _MODULE_NAME = __name__
 _VERBOSITY = get_effective_verbosity(_MODULE_NAME)
@@ -505,15 +489,15 @@ def _calc_charged_boundary_gridpoints(
 
     x_stride, y_stride = np.int64(ny * nz), np.int64(nz)
 
-    # Check for empty inputs early
+    # Check for zero inputs early
     if num_unique_charged == 0:
-        return 0, np.empty((0, 2), dtype=np.float64)  # Return format [idx1d, factor]
+        return 0, np.zeros((0, 2), dtype=np.float64)  # Return format [idx1d, factor]
 
     # --- Step 4: Build sorted boundary 1D index array ---
     if num_boundary == 0:
-        sorted_boundary_point_indices_1d = np.empty(0, dtype=np.int64)
+        sorted_boundary_point_indices_1d = np.zeros(0, dtype=np.int64)
     else:
-        boundary_point_indices_1d = np.empty(num_boundary, dtype=np.int64)
+        boundary_point_indices_1d = np.zeros(num_boundary, dtype=np.int64)
         # This loop can be parallel
         for i in prange(num_boundary):
             # Ensure indices are integer
@@ -532,7 +516,7 @@ def _calc_charged_boundary_gridpoints(
         sorted_boundary_point_indices_1d = np.sort(valid_boundary_indices)
 
     # --- Step 5: Final pass to calculate adjustment factor ---
-    charged_bgp_info_final = np.empty((num_unique_charged, 2), dtype=np.float64)
+    charged_bgp_info_final = np.zeros((num_unique_charged, 2), dtype=np.float64)
     final_count = 0  # Count points that are actually on the boundary
 
     for i in range(num_unique_charged):
@@ -571,9 +555,16 @@ def _calc_charged_boundary_gridpoints(
 
     return final_count, charged_bgp_info_final[:final_count]
 
+
 @cuda.jit(cache=True)
-def _rf_energy_kernel_outer_surf(induced_surf_charges_flat, induced_surf_charge_positions,
-                                 atoms_data, outer_start, n_active, out_nthreads):
+def _rf_energy_kernel_outer_surf(
+    induced_surf_charges_flat,
+    induced_surf_charge_positions,
+    atoms_data,
+    outer_start,
+    n_active,
+    out_nthreads,
+):
     """
     CUDA kernel where outer loop is over surface charges.
     Each thread computes one surface charge contribution summing over all atoms.
@@ -591,7 +582,7 @@ def _rf_energy_kernel_outer_surf(induced_surf_charges_flat, induced_surf_charge_
     surf_x = induced_surf_charge_positions[i, 0]
     surf_y = induced_surf_charge_positions[i, 1]
     surf_z = induced_surf_charge_positions[i, 2]
-    surf_q = induced_surf_charges_flat[i*4 + 3]
+    surf_q = induced_surf_charges_flat[i * 4 + 3]
 
     acc = 0.0
     for j in range(n_atoms):
@@ -603,7 +594,7 @@ def _rf_energy_kernel_outer_surf(induced_surf_charges_flat, induced_surf_charge_
         dx = surf_x - atom_x
         dy = surf_y - atom_y
         dz = surf_z - atom_z
-        dist_sq = dx*dx + dy*dy + dz*dz
+        dist_sq = dx * dx + dy * dy + dz * dz
 
         if dist_sq > APPROX_ZERO:
             acc += atom_q / math.sqrt(dist_sq)
@@ -612,8 +603,14 @@ def _rf_energy_kernel_outer_surf(induced_surf_charges_flat, induced_surf_charge_
 
 
 @cuda.jit(cache=True)
-def _rf_energy_kernel_outer_atom(induced_surf_charges_flat, induced_surf_charge_positions,
-                                atoms_data, outer_start, n_active, out_nthreads):
+def _rf_energy_kernel_outer_atom(
+    induced_surf_charges_flat,
+    induced_surf_charge_positions,
+    atoms_data,
+    outer_start,
+    n_active,
+    out_nthreads,
+):
     """
     CUDA kernel where outer loop is over atoms.
     Each thread computes one atom contribution summing over all surface charges.
@@ -638,12 +635,12 @@ def _rf_energy_kernel_outer_atom(induced_surf_charges_flat, induced_surf_charge_
         surf_x = induced_surf_charge_positions[i, 0]
         surf_y = induced_surf_charge_positions[i, 1]
         surf_z = induced_surf_charge_positions[i, 2]
-        surf_q = induced_surf_charges_flat[i*4 + 3]
+        surf_q = induced_surf_charges_flat[i * 4 + 3]
 
         dx = atom_x - surf_x
         dy = atom_y - surf_y
         dz = atom_z - surf_z
-        dist_sq = dx*dx + dy*dy + dz*dz
+        dist_sq = dx * dx + dy * dy + dz * dz
 
         if dist_sq > APPROX_ZERO:
             acc += surf_q / math.sqrt(dist_sq)
@@ -651,7 +648,9 @@ def _rf_energy_kernel_outer_atom(induced_surf_charges_flat, induced_surf_charge_
     out_nthreads[tid] = acc * atom_q
 
 
-def _rf_energy_gpu(induced_surf_charges_flat, induced_surf_charge_positions, atoms_data, epkt):
+def _rf_energy_gpu(
+    induced_surf_charges_flat, induced_surf_charge_positions, atoms_data, epkt
+):
     """
     Computes the reaction field energy on GPU using CUDA.
     Dynamically chooses outer dimension based on sizes and chunks the computation
@@ -680,17 +679,23 @@ def _rf_energy_gpu(induced_surf_charges_flat, induced_surf_charge_positions, ato
         n_active = min(threads_per_block * max_blocks, outer_size - outer_start)
         blocks = (n_active + threads_per_block - 1) // threads_per_block
 
-        out_nthreads_device = cuda.device_array(shape=(threads_per_block*blocks,), dtype=np.float64)
-        kernel[blocks, threads_per_block](induced_surf_charges_flat,
-                                          induced_surf_charge_positions,
-                                          atoms_data,
-                                          outer_start, n_active,
-                                          out_nthreads_device)
+        out_nthreads_device = cuda.to_device(
+            np.zeros(shape=(threads_per_block * blocks,), dtype=np.float64)
+        )
+        kernel[blocks, threads_per_block](
+            induced_surf_charges_flat,
+            induced_surf_charge_positions,
+            atoms_data,
+            outer_start,
+            n_active,
+            out_nthreads_device,
+        )
         cuda.synchronize()
         partial_host = out_nthreads_device.copy_to_host()
         total_energy += np.sum(partial_host[:n_active])
 
     return total_energy * epkt * 0.5
+
 
 def calc_induced_charge_rf_energy(
     platform: Platform,
@@ -764,14 +769,14 @@ def calc_induced_charge_rf_energy(
     )
     toc_crg_gp = time.perf_counter()
     vprint(
-        INFO,
+        VERBOSE,
         _VERBOSITY,
         f"INFO: Time calculating charged grid points: {toc_crg_gp-tic_crg_gp:0.3f}",
     )
     nprint_cpu(
         DEBUG,
         _VERBOSITY,
-        "INFO: Found ",
+        "Found ",
         num_unique_charged,
         " unique charged boundary gridpoints.",
     )
@@ -779,7 +784,7 @@ def calc_induced_charge_rf_energy(
         pp.pprint(f"unique_charged_gridpoints(len={num_unique_charged})")
         pp.pprint((num_unique_charged, unique_charged_gridpoints[:num_unique_charged]))
 
-    nprint_cpu(DEBUG, _VERBOSITY, "INFO: Calculating induced surface charges...")
+    nprint_cpu(DEBUG, _VERBOSITY, "Calculating induced surface charges...")
     tic_srf_crg = time.perf_counter()
     induced_surf_charges_flat = _calculate_induced_surface_charges(
         charged_bgp_info,  # Pass the [index_1d, factor] array
@@ -791,11 +796,11 @@ def calc_induced_charge_rf_energy(
     )
     toc_srf_crg = time.perf_counter()
     vprint(
-        INFO,
+        VERBOSE,
         _VERBOSITY,
-        f"INFO: Time calculating induced surf charges: {toc_srf_crg - tic_srf_crg:0.3f}",
+        f"Time calculating induced surf charges: {toc_srf_crg - tic_srf_crg:0.3f}",
     )
-    nprint_cpu(DEBUG, _VERBOSITY, "INFO: Calculating reaction field energy...")
+    nprint_cpu(DEBUG, _VERBOSITY, "Calculating reaction field energy...")
 
     if dump_arrays:
         pp.pprint("dielectric_boundary_grids")
@@ -817,16 +822,18 @@ def calc_induced_charge_rf_energy(
             thread_local_sums,
         )
     else:
-        energy_solvation = _rf_energy_gpu(induced_surf_charges_flat, induced_surf_charge_positions, atoms_data, epkt)
+        energy_solvation = _rf_energy_gpu(
+            induced_surf_charges_flat, induced_surf_charge_positions, atoms_data, epkt
+        )
     toc_rf_erg = time.perf_counter()
 
     vprint(
-        INFO,
+        VERBOSE,
         _VERBOSITY,
-        f"INFO: Time calculating induced surf rf energy: {toc_rf_erg - tic_rf_erg:0.3f}",
+        f"Time calculating induced surf rf energy: {toc_rf_erg - tic_rf_erg:0.3f}",
     )
     nprint_cpu(
-        DEBUG, _VERBOSITY, "INFO: Calculated Solvation Energy: {energy_solvation}"
+        DEBUG, _VERBOSITY, "Calculated Solvation Energy: {energy_solvation}"
     )
     if dump_arrays:
         pp.pprint(f"induced_surf_charge_positions:")

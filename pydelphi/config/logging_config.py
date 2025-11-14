@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 Centralized module for managing global and module-specific verbosity levels.
@@ -59,6 +41,7 @@ ERROR = _VL.ERROR.int_value  # 40
 NOTICE = _VL.NOTICE.int_value  # 35
 WARNING = _VL.WARNING.int_value  # 30
 INFO = _VL.INFO.int_value  # 20
+VERBOSE = _VL.VERBOSE.int_value # 15
 DEBUG = _VL.DEBUG.int_value  # 10
 TRACE = _VL.TRACE.int_value  # 5
 

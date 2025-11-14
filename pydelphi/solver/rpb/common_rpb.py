@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides functions for calculating electrostatic potentials and related properties
@@ -75,6 +57,7 @@ from pydelphi.constants import (
     BOX_BOUNDARY,
     BOX_INTERIOR,
     BOX_HOMO_EPSILON,
+    BOX_ION_ACCESSIBLE,
 )
 
 if PRECISION.value == Precision.SINGLE.value:
@@ -347,11 +330,26 @@ def _cuda_calc_grad_epsilon_in_map(
     atoms_data: np.ndarray[delphi_real],
     density_gridpoint_map_1d: np.ndarray[delphi_real],
     grad_epsin_map_1d: np.ndarray[delphi_real],
+    # --- Added Voxel Map Parameters ---
+    neighbor_voxel_atom_ids_flat: np.ndarray[delphi_int],
+    neighbor_voxel_atom_start_index: np.ndarray[delphi_int],
+    neighbor_voxel_atom_end_index: np.ndarray[delphi_int],
+    voxel_map_origin: np.ndarray[delphi_real],
+    voxel_map_shape: np.ndarray[delphi_int],
+    voxel_map_scale: delphi_real,
+    # ----------------------------------
 ):
     y_stride = grid_shape[2]
     x_stride = grid_shape[1] * y_stride
     n_grid_points = grid_shape[0] * x_stride
     ijk1d = cuda.grid(1)
+
+    num_atoms = atoms_data.shape[0]
+
+    v_origin = voxel_map_origin
+    v_shape = voxel_map_shape
+    v_scale = voxel_map_scale
+
     if ijk1d < n_grid_points:
         i = ijk1d // x_stride
         j = (ijk1d - i * x_stride) // y_stride
@@ -367,39 +365,76 @@ def _cuda_calc_grad_epsilon_in_map(
         gaussian_exponent_minus_1 = gaussian_exponent - 1
         gaussian_exponent_x_2 = gaussian_exponent * 2
         total_density = density_gridpoint_map_1d[ijk1d]
-        for this_atom in atoms_data:
-            atom_crd_x = cu_get_atom_x(this_atom)
-            atom_crd_y = cu_get_atom_y(this_atom)
-            atom_crd_z = cu_get_atom_z(this_atom)
-            atom_radius = cu_get_atom_radius(this_atom)
-            atom_sigma = cu_get_atom_gaussiansigma(this_atom)
-            atom_sigma_x_atom_radius_square = (
-                atom_sigma * atom_sigma * atom_radius * atom_radius
-            )
-            delta_rx = grid_pos_x - atom_crd_x
-            delta_ry = grid_pos_y - atom_crd_y
-            delta_rz = grid_pos_z - atom_crd_z
-            dist_square = (
-                delta_rx * delta_rx + delta_ry * delta_ry + delta_rz * delta_rz
-            )
-            if dist_square < approx_zero:
-                continue
-            dist_factor = dist_square**gaussian_exponent_minus_1
-            atom_factor = gaussian_exponent_x_2 / (
-                atom_sigma_x_atom_radius_square**gaussian_exponent
-            )
-            density = math.exp(
-                -((dist_square / atom_sigma_x_atom_radius_square) ** gaussian_exponent)
-            )
 
-            if 1 - density > approx_zero:
-                density_factor = density * (1 - total_density) / (1 - density)
-                all_but_crd_factor = (
-                    diff_gap_indi * atom_factor * density_factor * dist_factor
-                )
-                this_epsin_map_dx = this_epsin_map_dx + delta_rx * all_but_crd_factor
-                this_epsin_map_dy = this_epsin_map_dy + delta_ry * all_but_crd_factor
-                this_epsin_map_dz = this_epsin_map_dz + delta_rz * all_but_crd_factor
+        # --- Map fine grid point to central coarse voxel ---
+        central_vx = max(
+            0, min(delphi_int((grid_pos_x - v_origin[0]) * v_scale), v_shape[0])
+        )
+        central_vy = max(
+            0, min(delphi_int((grid_pos_y - v_origin[1]) * v_scale), v_shape[1])
+        )
+        central_vz = max(
+            0, min(delphi_int((grid_pos_z - v_origin[2]) * v_scale), v_shape[2])
+        )
+
+        if (
+            0 <= central_vx <= voxel_map_shape[0]
+            and 0 <= central_vy <= voxel_map_shape[1]
+            and 0 <= central_vz <= voxel_map_shape[2]
+        ):
+            start = neighbor_voxel_atom_start_index[central_vx, central_vy, central_vz]
+            end = neighbor_voxel_atom_end_index[central_vx, central_vy, central_vz]
+            if start <= end:
+                for atom_list_idx in range(start, end + 1):
+                    # Atom index is 1-based in ids array, to map to 0-based index -1 is needed.
+                    atom_id_raw = neighbor_voxel_atom_ids_flat[atom_list_idx]
+                    if atom_id_raw == 0:
+                        continue  # Sentinel: skip
+
+                    atom_idx = atom_id_raw - 1  # Now safe to subtract
+                    this_atom = atoms_data[atom_idx]
+
+                    atom_crd_x = cu_get_atom_x(this_atom)
+                    atom_crd_y = cu_get_atom_y(this_atom)
+                    atom_crd_z = cu_get_atom_z(this_atom)
+                    atom_radius = cu_get_atom_radius(this_atom)
+                    atom_sigma = cu_get_atom_gaussiansigma(this_atom)
+                    atom_sigma_x_atom_radius_square = (
+                        atom_sigma * atom_sigma * atom_radius * atom_radius
+                    )
+                    delta_rx = grid_pos_x - atom_crd_x
+                    delta_ry = grid_pos_y - atom_crd_y
+                    delta_rz = grid_pos_z - atom_crd_z
+                    dist_square = (
+                        delta_rx * delta_rx + delta_ry * delta_ry + delta_rz * delta_rz
+                    )
+                    if dist_square < approx_zero:
+                        continue
+                    dist_factor = dist_square**gaussian_exponent_minus_1
+                    atom_factor = gaussian_exponent_x_2 / (
+                        atom_sigma_x_atom_radius_square**gaussian_exponent
+                    )
+                    density = math.exp(
+                        -(
+                            (dist_square / atom_sigma_x_atom_radius_square)
+                            ** gaussian_exponent
+                        )
+                    )
+
+                    if 1 - density > approx_zero:
+                        density_factor = density * (1 - total_density) / (1 - density)
+                        all_but_crd_factor = (
+                            diff_gap_indi * atom_factor * density_factor * dist_factor
+                        )
+                        this_epsin_map_dx = (
+                            this_epsin_map_dx + delta_rx * all_but_crd_factor
+                        )
+                        this_epsin_map_dy = (
+                            this_epsin_map_dy + delta_ry * all_but_crd_factor
+                        )
+                        this_epsin_map_dz = (
+                            this_epsin_map_dz + delta_rz * all_but_crd_factor
+                        )
         grad_epsin_map_1d[ijk1d_x_3] = delphi_real(this_epsin_map_dx)
         grad_epsin_map_1d[ijk1d_x_3 + 1] = delphi_real(this_epsin_map_dy)
         grad_epsin_map_1d[ijk1d_x_3 + 2] = delphi_real(this_epsin_map_dz)
@@ -416,10 +451,24 @@ def _cpu_calc_grad_epsilon_in_map(
     atoms_data: np.ndarray[delphi_real],
     density_gridpoint_map_1d: np.ndarray[delphi_real],
     grad_epsin_map_1d: np.ndarray[delphi_real],
+    # --- Added Voxel Map Parameters ---
+    neighbor_voxel_atom_ids_flat: np.ndarray[delphi_int],
+    neighbor_voxel_atom_start_index: np.ndarray[delphi_int],
+    neighbor_voxel_atom_end_index: np.ndarray[delphi_int],
+    voxel_map_origin: np.ndarray[delphi_real],
+    voxel_map_shape: np.ndarray[delphi_int],
+    voxel_map_scale: delphi_real,
+    # ----------------------------------
 ):
     y_stride = grid_shape[2]
     x_stride = grid_shape[1] * y_stride
     n_grid_points = grid_shape[0] * x_stride
+
+    num_atoms = atoms_data.shape[0]
+
+    v_origin = voxel_map_origin
+    v_shape = voxel_map_shape
+    v_scale = voxel_map_scale
 
     for ijk1d in prange(n_grid_points):
         i = ijk1d // x_stride
@@ -435,42 +484,78 @@ def _cpu_calc_grad_epsilon_in_map(
         this_epsin_map_dz = 0.0
 
         total_density = density_gridpoint_map_1d[ijk1d]
-        for this_atom in atoms_data:
-            atom_crd_x = get_atom_x(this_atom)
-            atom_crd_y = get_atom_y(this_atom)
-            atom_crd_z = get_atom_z(this_atom)
-            atom_radius = get_atom_radius(this_atom)
-            atom_sigma = get_atom_gaussiansigma(this_atom)
-            delta_rx = grid_pos_x - atom_crd_x
-            delta_ry = grid_pos_y - atom_crd_y
-            delta_rz = grid_pos_z - atom_crd_z
-            dist_square = delta_rx**2 + delta_ry**2 + delta_rz**2
-            if dist_square < approx_zero:
-                continue
-            dist_factor = dist_square ** (gaussian_exponent - 1)
-            atom_factor = (2 * gaussian_exponent) / (
-                (atom_sigma * atom_radius) ** (2 * gaussian_exponent)
-            )
-            density = math.exp(
-                -(
-                    (dist_square / ((atom_sigma * atom_radius) ** 2))
-                    ** gaussian_exponent
-                )
-            )
 
-            if 1 - density > approx_zero:
-                density_factor = density * (1 - total_density) / (1 - density)
-                all_but_crd_factor = (
-                    diff_gap_indi * atom_factor * density_factor * dist_factor
-                )
-                # if i==29 and j==23 and k==22:
-                #     print("atom_factor * density_factor * dist_factor * srf_func_dr * (1/total_density**2)=", atom_factor , density_factor , dist_factor, srf_func_dr , (1/total_density**2), srf_square, delta_r)
-                #     print(surfacemap_dz[i][j][k], srf_factor * srf_square * delta_r[delphi_int(2)])
-                #     print("total_density=", total_density, "density=", density, srf_factor, srf_square, delta_r)
-                #     print()
-                this_epsin_map_dx = this_epsin_map_dx + delta_rx * all_but_crd_factor
-                this_epsin_map_dy = this_epsin_map_dy + delta_ry * all_but_crd_factor
-                this_epsin_map_dz = this_epsin_map_dz + delta_rz * all_but_crd_factor
+        # --- Map fine grid point to central coarse voxel ---
+        central_vx = max(
+            0, min(delphi_int((grid_pos_x - v_origin[0]) * v_scale), v_shape[0])
+        )
+        central_vy = max(
+            0, min(delphi_int((grid_pos_y - v_origin[1]) * v_scale), v_shape[1])
+        )
+        central_vz = max(
+            0, min(delphi_int((grid_pos_z - v_origin[2]) * v_scale), v_shape[2])
+        )
+
+        if (
+            0 <= central_vx <= voxel_map_shape[0]
+            and 0 <= central_vy <= voxel_map_shape[1]
+            and 0 <= central_vz <= voxel_map_shape[2]
+        ):
+            start = neighbor_voxel_atom_start_index[central_vx, central_vy, central_vz]
+            end = neighbor_voxel_atom_end_index[central_vx, central_vy, central_vz]
+            if start <= end:
+                for atom_list_idx in range(start, end + 1):
+                    # Atom index is 1-based in ids array, to map to 0-based index -1 is needed.
+                    atom_id_raw = neighbor_voxel_atom_ids_flat[atom_list_idx]
+                    if atom_id_raw == 0:
+                        continue  # Sentinel: skip
+
+                    atom_idx = atom_id_raw - 1  # Now safe to subtract
+                    # Ensure atom_idx is valid before accessing atoms_data
+                    if 0 <= atom_idx < num_atoms:
+                        this_atom = atoms_data[atom_idx]
+                        atom_crd_x = get_atom_x(this_atom)
+                        atom_crd_y = get_atom_y(this_atom)
+                        atom_crd_z = get_atom_z(this_atom)
+                        atom_radius = get_atom_radius(this_atom)
+                        atom_sigma = get_atom_gaussiansigma(this_atom)
+                        delta_rx = grid_pos_x - atom_crd_x
+                        delta_ry = grid_pos_y - atom_crd_y
+                        delta_rz = grid_pos_z - atom_crd_z
+                        dist_square = delta_rx**2 + delta_ry**2 + delta_rz**2
+                        if dist_square < approx_zero:
+                            continue
+                        dist_factor = dist_square ** (gaussian_exponent - 1)
+                        atom_factor = (2 * gaussian_exponent) / (
+                            (atom_sigma * atom_radius) ** (2 * gaussian_exponent)
+                        )
+                        density = math.exp(
+                            -(
+                                (dist_square / ((atom_sigma * atom_radius) ** 2))
+                                ** gaussian_exponent
+                            )
+                        )
+
+                        if 1 - density > approx_zero:
+                            density_factor = (
+                                density * (1 - total_density) / (1 - density)
+                            )
+                            all_but_crd_factor = (
+                                diff_gap_indi
+                                * atom_factor
+                                * density_factor
+                                * dist_factor
+                            )
+
+                            this_epsin_map_dx = (
+                                this_epsin_map_dx + delta_rx * all_but_crd_factor
+                            )
+                            this_epsin_map_dy = (
+                                this_epsin_map_dy + delta_ry * all_but_crd_factor
+                            )
+                            this_epsin_map_dz = (
+                                this_epsin_map_dz + delta_rz * all_but_crd_factor
+                            )
         grad_epsin_map_1d[ijk1d_x_3] = delphi_real(this_epsin_map_dx)
         grad_epsin_map_1d[ijk1d_x_3 + 1] = delphi_real(this_epsin_map_dy)
         grad_epsin_map_1d[ijk1d_x_3 + 2] = delphi_real(this_epsin_map_dz)
@@ -535,7 +620,7 @@ def _cpu_setup_coulombic_boundary_condition(
             phimap_1d[ijk1d] = 0.0
 
 
-@cuda.jit(cache=True,fastmath=True)
+@cuda.jit(cache=True, fastmath=True)
 def _cuda_setup_coulombic_boundary_condition(
     vacuum: delphi_bool,
     grid_spacing: delphi_real,
@@ -595,7 +680,7 @@ def _cuda_setup_coulombic_boundary_condition(
             phimap_1d[ijk1d] = 0.0
 
 
-@njit(nogil=True, boundscheck=False, parallel=True, fastmath=True, cache=True)
+@njit(nogil=True, boundscheck=False, parallel=True, cache=True)
 def _cpu_setup_dipolar_boundary_condition(
     vacuum: delphi_bool,
     grid_spacing: delphi_real,
@@ -675,7 +760,6 @@ def _cpu_setup_dipolar_boundary_condition(
                     + grid_nve_dz * grid_nve_dz
                 )
                 fdist_nve = delphi_real(math.sqrt(grid_nve_dist_square) * grid_spacing)
-                # fdist_nve = distance(grid_3d_indices, grid_centroid_nve_charge)
                 fphi_nve = total_nve_charge / (fdist_nve * epsilon_temp)
                 if not vacuum:
                     fphi_nve *= math.exp(-fdist_nve * debye_length_inverse)
@@ -685,7 +769,7 @@ def _cpu_setup_dipolar_boundary_condition(
             phimap_1d[ijk1d] = 0.0
 
 
-@njit(nogil=True, boundscheck=False, parallel=True, fastmath=True, cache=True)
+@cuda.jit(cache=True)
 def _cuda_setup_dipolar_boundary_condition(
     vacuum: delphi_bool,
     grid_spacing: delphi_real,
@@ -852,9 +936,9 @@ def _cuda_prepare_charge_neigh_eps_sum_to_iterate(
                 and eps_k_minus_half == eps_i_minus_half
                 and eps_k_minus_half == eps_i_plus_half
             ):
-                boundary_gridpoints_1d[ijk1d] = BOX_HOMO_EPSILON
+                boundary_gridpoints_1d[ijk1d] |= BOX_HOMO_EPSILON
             else:
-                boundary_gridpoints_1d[ijk1d] = BOX_INTERIOR
+                boundary_gridpoints_1d[ijk1d] |= BOX_INTERIOR
 
     if vacuum == 0 and debye_length != delphi_real(
         ConstDelPhi.ZeroMolarSaltDebyeLength.value
@@ -867,7 +951,7 @@ def _cuda_prepare_charge_neigh_eps_sum_to_iterate(
             )
             # Update the charge-source with the green function for water case with
             # in regions accessible to salt at non-boundary grid points .
-            if boundary_gridpoints_1d[ijk1d] != BOX_BOUNDARY:
+            if (boundary_gridpoints_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY:
                 charge_map_1d[ijk1d] -= (
                     (1 - solute_surface_map_1d[ijk1d])
                     * kappa_square
@@ -897,7 +981,7 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
     coulomb_map_1d: np.ndarray[delphi_real],
     charge_map_1d: np.ndarray[delphi_real],
     eps_midpoint_neighs_sum_plus_salt_screening_1d: np.ndarray[delphi_real],
-    boundary_gridpoints_1d: np.ndarray[delphi_bool],
+    boundary_flags_1d: np.ndarray[delphi_bool],
 ):
     grid_spacing_square = grid_spacing**2
     kappa_square = exdi / debye_length**2
@@ -926,7 +1010,7 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
             or j == last_grid_id_y
             or k == last_grid_id_z
         ):
-            boundary_gridpoints_1d[ijk1d] = BOX_BOUNDARY
+            boundary_flags_1d[ijk1d] = BOX_BOUNDARY
             eps_midpoint_neighs_sum_plus_salt_screening_1d[ijk1d] = 6 * epsout
         else:
             # Internal point, not a gridbox boundary
@@ -958,9 +1042,9 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
                 and eps_k_minus_half == eps_i_minus_half
                 and eps_k_minus_half == eps_i_plus_half
             ):
-                boundary_gridpoints_1d[ijk1d] = BOX_HOMO_EPSILON
+                boundary_flags_1d[ijk1d] |= BOX_HOMO_EPSILON
             else:
-                boundary_gridpoints_1d[ijk1d] = BOX_INTERIOR
+                boundary_flags_1d[ijk1d] |= BOX_INTERIOR
 
     if (not vacuum) and non_zero_salt:
         if ion_exclusion_method_int_value == SOLUTE_SURFACE:
@@ -974,7 +1058,7 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
                 )
                 # Update the charge-source with the green function for water case with
                 # in regions accessible to salt at non-boundary grid points.
-                if boundary_gridpoints_1d[ijk1d] != BOX_BOUNDARY:
+                if boundary_flags_1d[ijk1d] != BOX_BOUNDARY:
                     charge_map_1d[ijk1d] -= (
                         (1 - solute_surface_map_1d[ijk1d])
                         * kappa_square
@@ -994,7 +1078,7 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
                 eps_midpoint_neighs_sum_plus_salt_screening_1d[
                     ijk1d
                 ] += screening_factor
-                if boundary_gridpoints_1d[ijk1d] != BOX_BOUNDARY:
+                if boundary_flags_1d[ijk1d] != BOX_BOUNDARY:
                     charge_map_1d[ijk1d] -= (
                         (1 - solute_surface_map_1d[ijk1d])
                         * kappa_square
@@ -1007,7 +1091,7 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
                 ] += kappa_x_grid_spacing_wholesquare * (
                     1 - ion_exclusion_map_1d[ijk1d]
                 )
-                if boundary_gridpoints_1d[ijk1d] != BOX_BOUNDARY:
+                if boundary_flags_1d[ijk1d] != BOX_BOUNDARY:
                     charge_map_1d[ijk1d] -= (
                         (1 - solute_surface_map_1d[ijk1d])
                         * kappa_square

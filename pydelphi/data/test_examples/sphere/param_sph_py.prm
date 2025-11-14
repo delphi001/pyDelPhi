@@ -2,9 +2,9 @@ gsize=95
 scale=2.0 
 !gridbox_margin=15.0
 
-in(pdb,file="/home/skp/Documents/GitHub/pydelphi_typed_dev/examples/sphere/sphere.pdb")
-in(siz,file="/home/skp/Documents/GitHub/pydelphi_typed_dev/examples/sphere/sphere.siz")
-in(crg,file="/home/skp/Documents/GitHub/pydelphi_typed_dev/examples/sphere/sphere.crg")
+in(pdb,file="sphere.pdb")
+in(siz,file="sphere.siz")
+in(crg,file="sphere.crg")
 
 indi=1.0
 exdi=80.0
@@ -16,4 +16,4 @@ bndcon=coulombic
 maxc=0.0001
 linit=800
 energy(p,c,g)
-out(phi,file="/home/skp/Documents/GitHub/pydelphi_typed_dev/examples/sphere/phimap_py.cube",format=cube)
+out(phi,file="phimap_py.cube",format=cube)

@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 """
 Module defining enumeration classes and a gridbox dimension class for pydelphi configuration.
@@ -110,7 +93,11 @@ class VerbosityLevel(BaseInfoEnum):
     )
     INFO = (
         20,
-        "Log general application progress, informational messages, and significant events (formerly APPLICATION and VERBOSE).",
+        "Log general application progress, informational messages, and significant events.",
+    )
+    VERBOSE = (
+        15,
+        "Log extended application progress and runtime informational messages.",
     )
     DEBUG = (
         10,

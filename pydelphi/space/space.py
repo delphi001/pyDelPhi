@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 import time
 import math
@@ -363,7 +345,7 @@ class Space:
         self.index_discrete_epsilon_map_1d = np.zeros(
             self.num_grid_points * 3, dtype=np.int32
         )
-        self.dielectric_boundary_map_1d = np.empty(self.num_grid_points, dtype=np.bool_)
+        self.dielectric_boundary_map_1d = np.zeros(self.num_grid_points, dtype=np.bool_)
 
         # Retrieve data/params for the call
         voxel_ids, voxel_start, voxel_end = self.atom_voxel_map_data
@@ -837,7 +819,7 @@ class Space:
                 "{:0.3f}".format(toc_srf - toc_grdcrg)
             )
 
-            # ATTENTION: If zeta-surface is enabled `vdw_molecular_surface` must also be
+            # Important: If zeta-surface is enabled `vdw_molecular_surface` must also be
             # calculated to satisfy downstream usage.
             if self.use_zeta_surf:
                 self._calculate_vdw_molecular_surface()
@@ -914,7 +896,7 @@ class Space:
         ):
             epsilon_map_1d_local = None
             epsilon_r_map_1d_local = None
-            # ATTENTION: GCS, surface_map is known only at grid points, at midpoints is approximated from neighbors.
+            # Important: GCS, surface_map is known only at grid points, at midpoints is approximated from neighbors.
             # So, is_surf_midpoints_arg must be False to enable approximation at midpoints for GCS.
             is_surf_midpoints_arg = (
                 False

@@ -77,6 +77,7 @@ from pydelphi.constants import (
     BOX_BOUNDARY,  # The grid-point is on the gridbox boundary
     BOX_INTERIOR,  # The grid-point is box interior point
     BOX_HOMO_EPSILON,  # The grid-point's all neighbor midpoints dielectric are equal.
+    BOX_ION_ACCESSIBLE,
 )
 
 from pydelphi.constants import ConstDelPhiFloats as ConstDelPhi
@@ -101,6 +102,41 @@ elif PRECISION.value == Precision.DOUBLE.value:
     except ImportError:
         pass
         # print("No Cuda")
+
+
+@njit(nogil=True, boundscheck=False, parallel=False, cache=True)
+def _cpu_mark_ion_accessible_in_boundary_flags_1d(
+    ion_exclusion_map_1d: np.ndarray,  # 1=accessible, 0=excluded
+    boundary_flags_1d: np.ndarray,  # uint8 bitmask array
+):
+    """
+    Update the boundary flag bitmask to encode ion accessibility for each gridpoint (CPU version).
+
+    Grid points that are **ion-accessible** (i.e., not excluded from the solvent region)
+    are marked with the `BOX_ION_ACCESSIBLE` bit in `boundary_flags_1d`,
+    provided they are not part of the geometric simulation box boundary itself.
+
+    This function is CPU-only and intended for internal preprocessing within
+    the electrostatic setup phase.
+
+    Args:
+        ion_exclusion_map_1d (np.ndarray[bool or int8]):
+            1D array where `1` marks ion-accessible gridpoints and `0` marks excluded ones.
+        boundary_flags_1d (np.ndarray[uint8]):
+            Bitmask array storing per-gridpoint boundary and accessibility flags.
+
+    Mutates:
+        boundary_flags_1d:
+            Updated in place — sets the `BOX_ION_ACCESSIBLE` bit for all
+            non-boundary, ion-accessible gridpoints.
+    """
+    n = ion_exclusion_map_1d.shape[0]
+    for ijk1d in prange(n):
+        if (
+            not ion_exclusion_map_1d[ijk1d]
+            and (boundary_flags_1d[ijk1d] & BOX_BOUNDARY) != BOX_BOUNDARY
+        ):
+            boundary_flags_1d[ijk1d] |= BOX_ION_ACCESSIBLE
 
 
 @njit(nogil=True, boundscheck=False, cache=True)
@@ -336,7 +372,7 @@ def _cpu_setup_coulombic_boundary_condition(
             phimap_1d[ijk1d] = this_grid_phi  # Set boundary potential
 
 
-@cuda.jit(cache=True,fastmath=True)
+@cuda.jit(cache=True, fastmath=True)
 def _cuda_setup_coulombic_boundary_condition(
     vacuum: delphi_bool,
     grid_spacing: delphi_real,
@@ -516,7 +552,7 @@ def _cpu_setup_dipolar_boundary_condition(
             phimap_1d[ijk1d] = temp_phi_this_grid
 
 
-@cuda.jit(cache=True,fastmath=True)
+@cuda.jit(cache=True, fastmath=True)
 def _cuda_setup_dipolar_boundary_condition(
     vacuum: delphi_bool,
     has_pve_charges: delphi_bool,
@@ -589,7 +625,7 @@ def _cuda_setup_dipolar_boundary_condition(
                     math.sqrt(grid_pve_dist_square) * grid_spacing
                 )
                 temp_phi_pve = total_pve_charge / (dist_to_pve * epsilon_temp)
-                if not vacuum:
+                if (not vacuum) and non_zero_salt:
                     temp_phi_pve *= math.exp(
                         -dist_to_pve * debye_length_inverse
                     )  # Apply Debye-Huckel screening if not vacuum
@@ -701,9 +737,9 @@ def _cuda_prepare_charge_neigh_eps_sum_to_iterate(
                 and eps_k_minus_half == eps_i_minus_half
                 and eps_k_minus_half == eps_i_plus_half
             ):
-                boundary_gridpoints_1d[ijk1d] = BOX_HOMO_EPSILON
+                boundary_gridpoints_1d[ijk1d] |= BOX_HOMO_EPSILON
             else:
-                boundary_gridpoints_1d[ijk1d] = BOX_INTERIOR
+                boundary_gridpoints_1d[ijk1d] |= BOX_INTERIOR
         else:
             boundary_gridpoints_1d[ijk1d] = BOX_BOUNDARY  # Mark as boundary point.
             eps_midpoint_neighs_sum_salt_screening_1d[ijk1d] = (
@@ -820,9 +856,9 @@ def _cpu_prepare_charge_neigh_eps_sum_to_iterate(
                 and eps_k_minus_half == eps_i_minus_half
                 and eps_k_minus_half == eps_i_plus_half
             ):
-                boundary_gridpoints_1d[ijk1d] = BOX_HOMO_EPSILON
+                boundary_gridpoints_1d[ijk1d] |= BOX_HOMO_EPSILON
             else:
-                boundary_gridpoints_1d[ijk1d] = BOX_INTERIOR
+                boundary_gridpoints_1d[ijk1d] |= BOX_INTERIOR
         else:
             boundary_gridpoints_1d[ijk1d] = BOX_BOUNDARY
             eps_midpoint_neighs_sum_plus_salt_screening_1d[ijk1d] = (

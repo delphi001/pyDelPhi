@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 This module provides the core functionality for calculating various types of energies
@@ -64,7 +46,7 @@ from pydelphi.energy.gridenergy import calc_grid_energy
 from pydelphi.energy.lj import calc_lj_energy
 from pydelphi.energy.nonlinear import energy_nonlinear
 from pydelphi.energy.nonpolar import calc_nonpolar_energy
-from pydelphi.energy.reactionfield_induced_surf_v2 import (
+from pydelphi.energy.reactionfield_iscm import (
     calc_reactionfield_energy,
     calc_induced_charge_rf_energy,
 )

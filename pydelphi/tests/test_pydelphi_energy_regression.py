@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 import os
 import sys
@@ -45,6 +28,9 @@ import tempfile
 import argparse
 import subprocess
 from typing import Dict, List, Tuple, Any
+
+from dataclasses import dataclass
+from typing import Optional
 
 # Local utility import expected in pydelphi environment
 from pydelphi.utils.utils import seconds_to_hms
@@ -73,14 +59,36 @@ TOLERANCES = {
 REFERENCE_ENERGY_KEYS = [k for k in TOLERANCES.keys() if k != "E_stress+E_osmotic"]
 
 FIXED_ABS_TOL_FOR_ZERO_REF = 0.001
-PERCENT_TOL_MINISCULE_REF = 0.65
-PERCENT_TOL_TINY_REF = 0.50
-PERCENT_TOL_SMALL_REF = 0.15
+PERCENT_TOL_MINISCULE_REF = 0.30
+PERCENT_TOL_TINY_REF = 0.20
+PERCENT_TOL_SMALL_REF = 0.10
 PERCENT_TOL_MEDIUM_REF = 0.01
 
-# ---------------------------------------------------------------------------
-# --- Controlled logging helper (explicit verbose param)
-# ---------------------------------------------------------------------------
+indent = "  "
+
+
+@dataclass
+class SubtestSummary:
+    tier: str  # RC or EC
+    platform: str  # cpu / cuda
+    precision: str  # single / double
+    threads: int
+    status: str  # PASS, FAIL, SKIPPED, etc.
+    tier1_pass: Optional[bool]
+    tier2_pass: Optional[bool]
+
+    # --- new fields identifying which energy term caused the worst Δ ---
+    worst_tier1_abbr: Optional[str] = None
+    worst_tier1_diff: Optional[float] = None
+    worst_tier1_ref: Optional[float] = None
+    worst_tier2_abbr: Optional[str] = None
+    worst_tier2_diff: Optional[float] = None
+    worst_tier2_ref: Optional[float] = None
+
+    # --- bookkeeping / metadata ---
+    time_taken: float = 0.0
+    error: Optional[str] = None
+
 
 def log(msg: str, verbose: bool, always: bool = False) -> None:
     """
@@ -92,11 +100,6 @@ def log(msg: str, verbose: bool, always: bool = False) -> None:
     """
     if always or verbose:
         print(msg)
-
-
-# ---------------------------------------------------------------------------
-# --- Tolerance helpers
-# ---------------------------------------------------------------------------
 
 
 def get_effective_tolerance(energy_key: str, ref_value: float) -> Tuple[float, str]:
@@ -377,6 +380,194 @@ def generate_param_file_content(case_data: dict, project_root: str) -> str:
     return "\n".join(content)
 
 
+def get_unique_csv_path(project_root: str) -> str:
+    unique_name = f"temp_energies_{uuid.uuid4().hex}.csv"
+    return os.path.join(project_root, unique_name)
+
+
+def print_splash_message(verbose: bool) -> None:
+    """
+    Prints the explanatory splash and methodology text.
+    This is intentionally printed only in verbose mode to keep normal runs quiet.
+    """
+
+    def print_wrapped(text, initial="", subsequent=""):
+        wrapper = textwrap.TextWrapper(
+            width=80, initial_indent=initial, subsequent_indent=subsequent
+        )
+        log(wrapper.fill(text), verbose)
+
+    import pydelphi as pydp  # local import
+
+    log("=" * 80, verbose)
+    log(
+        f"PyDelphi-{pydp.__version__} Regression Test Suite (Two-Tier Validation)",
+        verbose,
+    )
+    log("=" * 80, verbose)
+
+    print_wrapped(
+        "This suite enforces Two-Tier Validation for PyDelphi's energy calculations: "
+        "Tier 1 (External Reference) and Tier 2 (Internal PyDelphi Reference Core).",
+        "",
+        "  ",
+    )
+
+    print_wrapped(
+        "Tier 1 (External Reference): Compare each execution to values in the "
+        "external TSV reference (delphicpp-8.5.0).",
+        "  - ",
+        "    ",
+    )
+    print_wrapped(
+        "Tier 2 (Internal Reference Core, RC): Cross-compare each execution against "
+        "a designated PyDelphi Reference Core (CPU double minimal threads) using a "
+        "combined relative/absolute tolerance.",
+        "  - ",
+        "    ",
+    )
+    print_wrapped(
+        "Execution Layer (EC): Represents each tested PyDelphi configuration compared "
+        "against the Reference Core (RC) and the external reference (Tier 1 + Tier 2 checks).",
+        "  - ",
+        "    ",
+    )
+
+    print_wrapped(
+        f"Reference Core (RC): {REFERENCE_CORE_CONFIG[0].upper()}/"
+        f"{REFERENCE_CORE_CONFIG[1].upper()}/"
+        f"{REFERENCE_CORE_CONFIG[2]} nominal thread(s)",
+        "  - ",
+        "    ",
+    )
+    print_wrapped(
+        f"Internal Tolerance: RTOL={PDELPHI_CONSISTENCY_RTOL}, "
+        f"ATOL floor={PDELPHI_CONSISTENCY_ATOL_FLOOR}",
+        "  - ",
+        "    ",
+    )
+
+    print_wrapped(
+        "Test skipping logic: configurations skipped by flags are recorded in the "
+        "report as SKIPPED.",
+        "",
+        "  ",
+    )
+
+    print_wrapped(
+        f"RPBE override: single-thread target is replaced by {RPBE_MIN_THREADS} "
+        "threads for performance.",
+        "",
+        "  ",
+    )
+
+    log("=" * 80, verbose)
+    log("", verbose)
+
+
+def _rel_ratio(diff: Optional[float], ref: Optional[float]) -> Optional[float]:
+    """
+    Returns the signed relative deviation (Δ_rel) = (calc - ref) / max(|ref|, ε).
+    Positive means calc > ref, negative means calc < ref.
+    """
+    if diff is None or ref is None:
+        return None
+    denom = max(abs(ref), 1e-8)
+    return diff / denom  # preserve sign
+
+
+def fmt_pair(
+    tag: str,
+    abbr: Optional[str],
+    diff: Optional[float],
+    rel: Optional[float],
+    field_width: int = 47,
+) -> str:
+    """
+    Format a (Δ, rel%) pair into a fixed-width table field.
+    Ensures T1 and T2 columns align even when one is 'n/a'.
+    Example:
+        T1[E_total]         Δ=+1.047e+00 (+0.062%)
+        T2[E_rxn_corr_tot]  Δ=+0.000e+00 (+0.000%)
+        T2[n/a]             n/a
+    """
+    tag_field = f"{tag}[{abbr or 'n/a'}]".ljust(20)
+
+    if diff is None:
+        content = "n/a"
+    else:
+        sign = "+" if diff >= 0 else ""
+        diff_str = f"Δ={sign}{diff: .3e}".strip()
+        if rel is not None:
+            sign_rel = "+" if rel >= 0 else ""
+            rel_str = f"({sign_rel}{rel*100:7.3f}%)"
+            content = f"{diff_str:<16}{rel_str:<11}"
+        else:
+            content = f"{diff_str:<16}{'(n/a)':<11}"
+
+    # pad to fixed field width so T1 and T2 align exactly
+    return f"{tag_field}{content:<{field_width - 20}}"
+
+
+def log_subtest_summary(summary: SubtestSummary, verbose: bool):
+    """Print one-line, fixed-width subtest summary (TTY-safe, colorless)."""
+    import sys
+
+    use_color = sys.stdout.isatty()
+
+    def colorize(txt, code):
+        return f"\033[{code}m{txt}\033[0m" if use_color else txt
+
+    status = summary.status
+    if status == "PASS":
+        status_disp = colorize(status, "92")
+    elif status in ("FAIL", "ERROR"):
+        status_disp = colorize(status, "91")
+    elif status in ("TIMEOUT", "SKIPPED"):
+        status_disp = colorize(status, "93")
+    else:
+        status_disp = status
+
+    rel1 = _rel_ratio(summary.worst_tier1_diff, summary.worst_tier1_ref)
+    rel2 = _rel_ratio(summary.worst_tier2_diff, summary.worst_tier2_ref)
+
+    tier1_info = fmt_pair(
+        "T1", summary.worst_tier1_abbr, summary.worst_tier1_diff, rel1
+    )
+    tier2_info = fmt_pair(
+        "T2", summary.worst_tier2_abbr, summary.worst_tier2_diff, rel2
+    )
+
+    # --- widened Status field (12 chars) ---
+    msg = (
+        f" {indent}[{summary.tier:<2}] "
+        f"{summary.platform:<5}/{summary.precision:<7}/{summary.threads:<3} "
+        f"→ {status_disp:<12} "
+        f"{tier1_info}  {tier2_info} "
+        f"in {summary.time_taken:7.2f}s"
+    )
+
+    if summary.error:
+        msg += f" ⚠ {summary.error[:80]}"
+    log(msg, verbose, always=True)
+
+
+def format_row_for_csv(row_data: dict) -> dict:
+    """
+    Formats float values in a dictionary to '14.6g' format,
+    booleans to PASS/FAIL strings, leaving other types unchanged.
+    """
+    formatted_row = {}
+    for key, value in row_data.items():
+        if isinstance(value, float):
+            formatted_row[key] = f"{value:14.6g}"
+        elif isinstance(value, bool):
+            formatted_row[key] = "PASS" if value else "FAIL"
+        else:
+            formatted_row[key] = value
+    return formatted_row
+
+
 def _read_calculated_energies(
     output_csv_path: str, tolerances_keys, test_report_row: dict, verbose: bool
 ) -> Dict[str, float]:
@@ -590,11 +781,6 @@ def _perform_lenient_stress_osmotic_test(
         test_report_row["E_stress_osmotic_sum_pass"] = False
 
 
-def get_unique_csv_path(project_root: str) -> str:
-    unique_name = f"temp_energies_{uuid.uuid4().hex}.csv"
-    return os.path.join(project_root, unique_name)
-
-
 def generate_skipped_report_row(
     case_data: dict,
     platform: str,
@@ -712,12 +898,6 @@ def run_delphi_subtest(
             output_csv_path,
             "--overwrite",
         ]
-
-        log(
-            f"Running subtest ({test_label}): Platform={platform}, Precision={precision}, Threads={threads_to_execute}",
-            verbose,
-            always=True,
-        )
 
         # Run pydelphi subprocess
         subprocess.run(
@@ -907,15 +1087,15 @@ def run_and_compare_all_combinations(
     gaussian_params = ""
     if dielectric_model == "GAUSSIAN":
         gaussian_params = (
-            f" \t(indi: {case_data.get('indi')}, exdi: {case_data.get('exdi')}, gapdi: {case_data.get('gapdi')}, "
+            f" {indent}indi: {case_data.get('indi')}, exdi: {case_data.get('exdi')}, gapdi: {case_data.get('gapdi')}, "
             f" gaussian_exponent: {case_data.get('gaussian_exponent')}, sigma={case_data.get('gaussian_sigma')}, density_cutoff: {case_data.get('density_cutoff')}) \n"
         )
 
     log(
         f"  Processing case {case_index + 1}/{num_cases}: {case_data.get('example')} with key parameters: \n"
-        f" \t(biomodel: {case_data.get('bio_model')}, dielectric_model: {case_data.get('dielectric_model')}, surface_method: {case_data.get('surface_method')}, \n"
+        f" {indent}(biomodel: {case_data.get('bio_model')}, dielectric_model: {case_data.get('dielectric_model')}, surface_method: {case_data.get('surface_method')}, \n"
         f"{gaussian_params}"
-        f" \tsolver: {case_data.get('solver')}, is_nonlinear={is_nonlinear}, salt: {case_data.get('salt')}, boundary_condition={case_data.get('boundary_condition')})",
+        f" {indent}solver: {case_data.get('solver')}, is_nonlinear={is_nonlinear}, salt: {case_data.get('salt')}, boundary_condition={case_data.get('boundary_condition')})",
         verbose,
         always=True,
     )
@@ -951,8 +1131,49 @@ def run_and_compare_all_combinations(
         elapsed_time = time.time() - start_time
         ref_report_row["time_taken"] = elapsed_time
         subtests_status.append(ref_report_row["status"])
-
         case_reports.append(ref_report_row)
+
+        # --- concise RC summary with relative context ---
+        # Find the energy term with the largest absolute difference
+        worst_t1_abbr, worst_t1_signed_diff = max(
+            (
+                (
+                    abbr,
+                    ref_report_row.get(f"{abbr}_test")
+                    - ref_report_row.get(f"{abbr}_ref"),
+                )
+                for abbr in REFERENCE_ENERGY_KEYS
+                if isinstance(ref_report_row.get(f"{abbr}_test"), (float, int))
+                and isinstance(ref_report_row.get(f"{abbr}_ref"), (float, int))
+            ),
+            key=lambda x: abs(x[1]),
+            default=(None, None),
+        )
+
+        worst_t1_ref = (
+            ref_report_row.get(f"{worst_t1_abbr}_ref") if worst_t1_abbr else None
+        )
+
+        summary = SubtestSummary(
+            tier="RC",
+            platform=ref_platform,
+            precision=ref_precision,
+            threads=threads_to_execute,
+            status=ref_report_row["status"],
+            tier1_pass=ref_report_row["status"] == "PASS",
+            tier2_pass=None,
+            worst_tier1_abbr=worst_t1_abbr,
+            worst_tier1_diff=(
+                worst_t1_signed_diff if worst_t1_signed_diff not in (0, None) else None
+            ),
+            worst_tier1_ref=worst_t1_ref,
+            worst_tier2_abbr="n/a",
+            worst_tier2_diff=None,
+            worst_tier2_ref=None,
+            time_taken=elapsed_time,
+            error=ref_report_row.get("error_message"),
+        )
+        log_subtest_summary(summary, verbose)
 
         if ref_report_row.get("status") == "PASS":
             for energy_abbr in REFERENCE_ENERGY_KEYS:
@@ -1002,9 +1223,57 @@ def run_and_compare_all_combinations(
             case_reports.append(report_row)
             subtests_status.append(ref_report_row["status"])
 
+            # --- concise EC summary ---
+            worst_t1_abbr, worst_t1_diff = max(
+                (
+                    (abbr, report_row.get(f"{abbr}_diff") or 0.0)
+                    for abbr in REFERENCE_ENERGY_KEYS
+                    if isinstance(report_row.get(f"{abbr}_diff"), (float, int))
+                ),
+                key=lambda x: x[1],
+                default=(None, None),
+            )
+            worst_t1_ref = (
+                report_row.get(f"{worst_t1_abbr}_ref") if worst_t1_abbr else None
+            )
+
+            worst_t2_abbr, worst_t2_diff = max(
+                (
+                    (abbr, report_row.get(f"{abbr}_pydp_diff") or 0.0)
+                    for abbr in REFERENCE_ENERGY_KEYS
+                    if isinstance(report_row.get(f"{abbr}_pydp_diff"), (float, int))
+                ),
+                key=lambda x: x[1],
+                default=(None, None),
+            )
+            worst_t2_ref = (
+                report_row.get(f"{worst_t2_abbr}_pydp_ref") if worst_t2_abbr else None
+            )
+
+            summary = SubtestSummary(
+                tier="EC",
+                platform=platform,
+                precision=precision,
+                threads=threads_to_execute,
+                status=report_row["status"],
+                tier1_pass=all(
+                    report_row.get(f"{abbr}_pass") for abbr in REFERENCE_ENERGY_KEYS
+                ),
+                tier2_pass=report_row.get("pydp_consistency_passed"),
+                worst_tier1_abbr=worst_t1_abbr,
+                worst_tier1_diff=worst_t1_diff,
+                worst_tier1_ref=worst_t1_ref,
+                worst_tier2_abbr=worst_t2_abbr,
+                worst_tier2_diff=worst_t2_diff,
+                worst_tier2_ref=worst_t2_ref,
+                time_taken=elapsed_time,
+                error=report_row.get("error_message"),
+            )
+            log_subtest_summary(summary, verbose)
+
     elapsed_all_combinations_time = time.time() - start_all_combinations_time
     log(
-        f"Time taken for case {case_data.get('example')} combinations: {elapsed_all_combinations_time:.2f} seconds. \n",
+        f" {indent}Time taken for case {case_data.get('example')} combinations: {elapsed_all_combinations_time:.2f} seconds. \n",
         verbose,
         always=True,
     )
@@ -1044,94 +1313,6 @@ def get_case_status(case_status_unique):
 
     # Fallback for any other scenario, though the defined rules should cover most cases.
     return "UNKNOWN"
-
-
-def print_splash_message(verbose: bool) -> None:
-    """
-    Prints the explanatory splash and methodology text.
-    This is intentionally printed only in verbose mode to keep normal runs quiet.
-    """
-
-    def print_wrapped(text, initial="", subsequent=""):
-        wrapper = textwrap.TextWrapper(
-            width=80, initial_indent=initial, subsequent_indent=subsequent
-        )
-        log(wrapper.fill(text), verbose)
-
-    import pydelphi as pydp  # local import
-
-    log("=" * 80, verbose)
-    log(
-        f"PyDelphi-{pydp.__version__} Regression Test Suite (Two-Tier Validation)",
-        verbose,
-    )
-    log("=" * 80, verbose)
-
-    print_wrapped(
-        "This suite enforces Two-Tier Validation for PyDelphi's energy calculations: Tier 1 (External Reference) "
-        "and Tier 2 (Internal PyDelphi Reference Core).",
-        "",
-        "  ",
-    )
-
-    print_wrapped(
-        "Tier 1: Compare each execution to values in the external TSV reference (delphicpp-8.5.0).",
-        "  - ",
-        "    ",
-    )
-    print_wrapped(
-        "Tier 2: Cross-compare each execution against a designated PyDelphi Reference Core "
-        "(CPU double minimal threads) using a combined relative/absolute tolerance.",
-        "  - ",
-        "    ",
-    )
-
-    print_wrapped(
-        f"Reference Core (Tier 2): {REFERENCE_CORE_CONFIG[0].upper()}/{REFERENCE_CORE_CONFIG[1].upper()}/{REFERENCE_CORE_CONFIG[2]} nominal thread(s)",
-        "  - ",
-        "    ",
-    )
-    print_wrapped(
-        f"Internal Tolerance: RTOL={PDELPHI_CONSISTENCY_RTOL}, ATOL floor={PDELPHI_CONSISTENCY_ATOL_FLOOR}",
-        "  - ",
-        "    ",
-    )
-
-    print_wrapped(
-        "Test skipping logic: configurations skipped by flags are recorded in the report as SKIPPED.",
-        "",
-        "  ",
-    )
-
-    print_wrapped(
-        f"RPBE override: single-thread target is replaced by {RPBE_MIN_THREADS} threads for performance.",
-        "",
-        "  ",
-    )
-
-    log("=" * 80, verbose)
-    log("", verbose)
-
-
-# ---------------------------------------------------------------------------
-# --- Formatting for CSV output
-# ---------------------------------------------------------------------------
-
-
-def format_row_for_csv(row_data: dict) -> dict:
-    """
-    Formats float values in a dictionary to '14.6g' format,
-    booleans to PASS/FAIL strings, leaving other types unchanged.
-    """
-    formatted_row = {}
-    for key, value in row_data.items():
-        if isinstance(value, float):
-            formatted_row[key] = f"{value:14.6g}"
-        elif isinstance(value, bool):
-            formatted_row[key] = "PASS" if value else "FAIL"
-        else:
-            formatted_row[key] = value
-    return formatted_row
 
 
 # ---------------------------------------------------------------------------
@@ -1175,8 +1356,8 @@ def main():
         sys.exit(1)
 
     total_start_time = time.time()
-    # Print splash only in verbose mode (quiet by default)
-    print_splash_message(args.verbose)
+    # Always show test setup and methodology for clarity and reproducibility
+    print_splash_message(True)
 
     # Project root detection (assumes tests live inside pydelphi/tests/)
     script_dir = os.path.dirname(__file__)

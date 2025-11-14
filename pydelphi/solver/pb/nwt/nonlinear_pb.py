@@ -17,25 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-
 """
 This module implements the Non-linear Poisson-Boltzmann Equation (NLPBE) solver,
 supporting both CPU and CUDA (GPU) computation platforms. It is designed to
@@ -64,7 +45,7 @@ global runtime configuration.
 import time
 import numpy as np
 
-from numba import set_num_threads
+from numba import set_num_threads, njit
 
 from pydelphi.foundation.enums import (
     Precision,
@@ -115,16 +96,20 @@ elif PRECISION.value == Precision.DOUBLE.value:
 from pydelphi.solver.core import (
     _copy_to_sample,
     _copy_to_full,
-    _calculate_phi_map_sample_rmsd,
+    _iteration_control_check,
 )
 
 from pydelphi.solver.pb.nwt.base import (
-    _cpu_iterate_block_nwt,
+    _cpu_iterate_nwt,
+    _cpu_iterate_nwt_with_dphi_rmsd,
     _cuda_iterate_nwt,
+    _cuda_reset_rmsd_and_dphi,
+    _cuda_iterate_nwt_with_dphi_rmsd,
 )
 
 from pydelphi.solver.pb.common_pb import (
     _set_gridpoint_charges,
+    _cpu_mark_ion_accessible_in_boundary_flags_1d,
     _cpu_setup_focusing_boundary_condition,
     _cpu_setup_coulombic_boundary_condition,
     _cuda_setup_coulombic_boundary_condition,
@@ -187,7 +172,8 @@ class NLNewtonPBESolver:
         epsmap_midpoints_1d: np.ndarray[delphi_real],
         charge_map_1d: np.ndarray[delphi_real],
         eps_midpoint_neighs_sum_only_1d: np.ndarray[delphi_real],
-        boundary_gridpoints_1d: np.ndarray[delphi_bool],
+        ion_exclusion_map_1d: np.ndarray[delphi_real],
+        boundary_flags_1d: np.ndarray[delphi_bool],
     ):
         """
         Prepares the necessary parameters and data structures for the iteration process in the PBE solver.
@@ -211,7 +197,8 @@ class NLNewtonPBESolver:
             charge_map_1d (np.ndarray[delphi_real]): 1D array holding the charge distribution.
             eps_midpoint_neighs_sum_only_1d (np.ndarray[delphi_real]): 1D array to hold the sum of dielectric constants
                                                                 from neighboring grid midpoints.
-            boundary_gridpoints_1d (np.ndarray[delphi_bool]): 1D boolean array marking the boundary grid points.
+            ion_exclusion_map_1d (np.ndarray[delphi_bool]): 1D real array data range [0,1] marking the ion excluded regions.
+            boundary_flags_1d (np.ndarray[delphi_bool]): 1D boolean array marking the boundary grid points.
 
         Returns:
             None
@@ -232,7 +219,7 @@ class NLNewtonPBESolver:
                 epsmap_midpoints_1d,
                 charge_map_1d,
                 eps_midpoint_neighs_sum_only_1d,
-                boundary_gridpoints_1d,
+                boundary_flags_1d,
             )
 
         elif self.platform.active == "cuda":
@@ -246,12 +233,10 @@ class NLNewtonPBESolver:
 
             epsmap_midpoints_1d_device = cuda.to_device(epsmap_midpoints_1d)
             charge_map_1d_device = cuda.to_device(charge_map_1d)
-            eps_midpoint_neighs_sum_only_1d_device = cuda.device_array_like(
+            eps_midpoint_neighs_sum_only_1d_device = cuda.to_device(
                 eps_midpoint_neighs_sum_only_1d
             )
-            boundary_gridpoints_1d_device = cuda.device_array_like(
-                boundary_gridpoints_1d
-            )
+            boundary_gridpoints_1d_device = cuda.to_device(boundary_flags_1d)
 
             # Launch the CUDA kernel with appropriate grid and block configuration
             _cuda_prepare_charge_neigh_eps_sum_to_iterate[
@@ -274,7 +259,7 @@ class NLNewtonPBESolver:
             eps_midpoint_neighs_sum_only_1d_device.copy_to_host(
                 eps_midpoint_neighs_sum_only_1d
             )
-            boundary_gridpoints_1d_device.copy_to_host(boundary_gridpoints_1d)
+            boundary_gridpoints_1d_device.copy_to_host(boundary_flags_1d)
 
             # Clear GPU memory by setting references to None
             grid_shape_device = None
@@ -284,18 +269,400 @@ class NLNewtonPBESolver:
             eps_midpoint_neighs_sum_only_1d_device = None
             boundary_gridpoints_1d_device = None
 
+        # Encode the ION_EXCLUSION Binary state in boundary_gridpoints_1d
+        _cpu_mark_ion_accessible_in_boundary_flags_1d(
+            ion_exclusion_map_1d,
+            boundary_flags_1d,
+        )
+
+    def _cpu_solve_nonlinear_pb_nwt(
+        self,
+        vacuum: delphi_bool,
+        phimap_current_1d: np.ndarray[delphi_real],
+        non_zero_salt: delphi_bool,
+        approx_zero: delphi_real,
+        omega_adaptive: delphi_real,
+        grid_shape: np.ndarray[delphi_int],
+        salt_ions_solvation_penalty_map_1d: np.ndarray[delphi_real],
+        epsilon_map_midpoints_1d: np.ndarray[delphi_real],
+        epsilon_sum_neighbors_sum_only_1d: np.ndarray[delphi_real],
+        boundary_flags_1d: np.ndarray[delphi_bool],
+        charge_map_1d: np.ndarray[delphi_real],
+        ion_exclusion_map_1d: np.ndarray[delphi_real],
+        itr_block_size: delphi_int,
+        max_nonlinear_iters: delphi_int,
+        rms_tol: delphi_real,
+        dphi_tol: delphi_real,
+        check_dphi: delphi_bool,
+        num_cpu_threads: delphi_int,
+        verbose: bool = True,
+    ):
+        """
+        CPU orchestrator for nonlinear Newton-like PB solver (v2).
+
+        Uses even/odd half-grid alternation identical to CUDA version.
+        RMSD/Δφ are computed only on the last odd iteration of each block.
+
+        Args:
+            All arguments mirror those of the CUDA version.
+
+        Returns:
+            (rmsd, max_dphi, total_iter)
+        """
+        nx, ny, nz = grid_shape
+        num_grid_points_half = (nx * ny * nz + 1) // 2
+        total_iter = 0
+
+        rmsd_buffer = np.zeros(10, dtype=np.float64)  # rolling RMSD buffer
+        ptr = 0
+        wrapped = False
+        stop_iters = False
+
+        # Half maps
+        phi_even_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
+        phi_odd_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
+        _copy_to_sample(phi_even_1d, phimap_current_1d, 0, 2)
+        _copy_to_sample(phi_odd_1d, phimap_current_1d, 1, 2)
+
+        vprint(
+            INFO,
+            _VERBOSITY,
+            f"\n    PBE> Running nonlinear CPU solver (NWT) with ω_adaptive={omega_adaptive:.3f}",
+        )
+        vprint(
+            INFO,
+            _VERBOSITY,
+            "    PBE> | #Iteration |    RMSD    |  Max(dPhi) | Time (seconds) |",
+        )
+
+        while not stop_iters and total_iter < max_nonlinear_iters:
+            tic_block = time.perf_counter()
+            total_sum_sq = 0.0
+            global_max_dphi = 0.0
+
+            for itr_in_block in range(itr_block_size):
+                for even_odd in (0, 1):
+                    is_last_iter = itr_in_block == itr_block_size - 1
+                    is_last_overall = (
+                        total_iter + itr_in_block + 1 >= max_nonlinear_iters
+                    )
+                    read_half = phi_odd_1d if even_odd == 0 else phi_even_1d
+                    write_half = phi_even_1d if even_odd == 0 else phi_odd_1d
+
+                    if (even_odd == 1) and (is_last_iter or is_last_overall):
+                        total_sum_sq, global_max_dphi = _cpu_iterate_nwt_with_dphi_rmsd(
+                            vacuum,
+                            even_odd,
+                            non_zero_salt,
+                            approx_zero,
+                            omega_adaptive,
+                            grid_shape,
+                            read_half,
+                            write_half,
+                            salt_ions_solvation_penalty_map_1d,
+                            epsilon_map_midpoints_1d,
+                            epsilon_sum_neighbors_sum_only_1d,
+                            boundary_flags_1d,
+                            charge_map_1d,
+                            ion_exclusion_map_1d,
+                            1,  # num_cpu_threads,
+                        )
+                    else:
+                        _cpu_iterate_nwt(
+                            vacuum,
+                            even_odd,
+                            non_zero_salt,
+                            approx_zero,
+                            omega_adaptive,
+                            grid_shape,
+                            read_half,
+                            write_half,
+                            salt_ions_solvation_penalty_map_1d,
+                            epsilon_map_midpoints_1d,
+                            epsilon_sum_neighbors_sum_only_1d,
+                            boundary_flags_1d,
+                            charge_map_1d,
+                            ion_exclusion_map_1d,
+                        )
+
+            total_iter += itr_block_size
+            toc_block = time.perf_counter()
+            rmsd = math.sqrt(total_sum_sq / num_grid_points_half)
+            max_dphi = abs(global_max_dphi)
+
+            vprint(
+                INFO,
+                _VERBOSITY,
+                f"    PBE> | {total_iter:10d} | {rmsd:10.4e} | {max_dphi:10.4e} | {toc_block - tic_block:14.6f} |",
+            )
+
+            # --- unified iteration control ---
+            stop_iters, status, ptr, wrapped = _iteration_control_check(
+                rmsd_buffer,
+                ptr,
+                wrapped,
+                rmsd,
+                max_dphi,
+                rms_tol,
+                dphi_tol,
+                check_dphi,
+                max_nonlinear_iters,
+                total_iter,
+                disable_stagnation_check=False,
+            )
+
+            if stop_iters:
+                if status == 1 and verbose:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (RMSD/ΔΦ thresholds satisfied)",
+                    )
+                elif status == 2 and verbose:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (stagnation plateau, relaxed criterion)",
+                    )
+                elif status == 3 and verbose:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Divergence detected (non-finite residuals)",
+                    )
+                break
+
+        # Reconstruct full phimap from half phimaps
+        _copy_to_full(phimap_current_1d, phi_even_1d, 0, 2)
+        _copy_to_full(phimap_current_1d, phi_odd_1d, 1, 2)
+
+        return rmsd, dphi_tol, total_iter
+
+    def _cuda_solve_nonlinear_pb_nwt(
+        self,
+        vacuum: delphi_bool,
+        phimap_current_1d: np.ndarray[delphi_real],
+        non_zero_salt: delphi_bool,
+        approx_zero: delphi_real,
+        omega_adaptive: delphi_real,
+        grid_shape: np.ndarray[delphi_int],
+        salt_ions_solvation_penalty_map_1d: np.ndarray[delphi_real],
+        epsmap_midpoints_1d: np.ndarray[delphi_real],
+        eps_midpoint_neighs_sum_only_1d: np.ndarray[delphi_real],
+        boundary_flags_1d: np.ndarray[delphi_bool],
+        charge_map_1d: np.ndarray[delphi_real],
+        ion_exclusion_map_1d: np.ndarray[delphi_real],
+        itr_block_size: delphi_int,
+        max_nonlinear_iters: delphi_int,
+        rms_tol: delphi_real,
+        dphi_tol: delphi_real,
+        check_dphi: delphi_bool,
+        num_cuda_threads: delphi_int,
+        verbosity_level: int,
+    ):
+        """
+        CUDA orchestrator for nonlinear Newton-like PB solver (v2).
+        Mirrors the flow of the CPU version exactly.
+        Uses persistent device arrays and computes RMSD/Δφ only on
+        the last odd iteration of each iteration block.
+        """
+        nx, ny, nz = grid_shape
+        num_grid_points_half = (nx * ny * nz + 1) // 2
+        n_blocks = (num_grid_points_half + num_cuda_threads - 1) // num_cuda_threads
+
+        # --- Device-side setup ---
+        grid_shape_device = cuda.to_device(grid_shape)
+        epsmap_midpoints_1d_device = cuda.to_device(epsmap_midpoints_1d)
+        eps_midpoint_neighs_sum_only_1d_device = cuda.to_device(
+            eps_midpoint_neighs_sum_only_1d
+        )
+        boundary_flags_1d_device = cuda.to_device(boundary_flags_1d)
+        charge_map_1d_device = cuda.to_device(charge_map_1d)
+        ion_exclusion_map_1d_device = cuda.to_device(ion_exclusion_map_1d)
+        salt_ions_solvation_penalty_map_1d_device = cuda.to_device(
+            salt_ions_solvation_penalty_map_1d
+        )
+        # print(
+        #     "CUDA:",
+        #     boundary_flags_1d.dtype,
+        #     boundary_flags_1d.min(),
+        #     boundary_flags_1d.max(),
+        # )
+        # print("CUDA, dtype:", boundary_flags_1d_device.dtype)
+        # print("CUDA, shape:", boundary_flags_1d_device.shape)
+
+        # --- Initialize phi halves ---
+        phi_even_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
+        phi_odd_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
+        _copy_to_sample(phi_even_1d, phimap_current_1d, 0, 2)
+        _copy_to_sample(phi_odd_1d, phimap_current_1d, 1, 2)
+
+        phi_even_device = cuda.to_device(phi_even_1d)
+        phi_odd_device = cuda.to_device(phi_odd_1d)
+
+        # --- Allocations for convergence accumulators ---
+        sum_sq_host = np.zeros(1, dtype=np.float64)
+        max_dphi_host = np.zeros(1, dtype=np.float64)
+        sum_sq_device = cuda.to_device(sum_sq_host)
+        max_dphi_device = cuda.to_device(max_dphi_host)
+
+        rmsd_buffer = np.zeros(10, dtype=np.float64)  # rolling RMSD buffer
+        ptr = 0
+        wrapped = False
+        stop_iters = False
+
+        total_iter = 0
+
+        vprint(
+            INFO,
+            _VERBOSITY,
+            f"\n    PBE> Running nonlinear CUDA solver (NWT) with ω_adaptive={omega_adaptive:.3f}",
+        )
+        vprint(
+            INFO,
+            _VERBOSITY,
+            "    PBE> | #Iteration |    RMSD    |  Max(dPhi) | Time (seconds) |",
+        )
+
+        # ======================
+        # Main iteration blocks
+        # ======================
+        while not stop_iters and total_iter < max_nonlinear_iters:
+            tic_block = time.perf_counter()
+            for itr_in_block in range(itr_block_size):
+                for even_odd in (0, 1):
+                    is_last_iter = itr_in_block == itr_block_size - 1
+                    is_last_overall = (
+                        total_iter + itr_in_block + 1
+                    ) >= max_nonlinear_iters
+
+                    # Select half maps
+                    read_half_device = (
+                        phi_odd_device if even_odd == 0 else phi_even_device
+                    )
+                    write_half_device = (
+                        phi_even_device if even_odd == 0 else phi_odd_device
+                    )
+
+                    # ----------------------
+                    # Main iteration switch
+                    # ----------------------
+                    if (even_odd == 1) and (is_last_iter or is_last_overall):
+                        # Reset accumulators each block
+                        _cuda_reset_rmsd_and_dphi[1, 1](sum_sq_device, max_dphi_device)
+                        cuda.synchronize()
+
+                        # Last odd iteration → fused RMSD kernel
+                        _cuda_iterate_nwt_with_dphi_rmsd[n_blocks, num_cuda_threads](
+                            vacuum,
+                            even_odd,
+                            non_zero_salt,
+                            approx_zero,
+                            omega_adaptive,
+                            grid_shape_device,
+                            read_half_device,
+                            write_half_device,
+                            salt_ions_solvation_penalty_map_1d_device,
+                            epsmap_midpoints_1d_device,
+                            eps_midpoint_neighs_sum_only_1d_device,
+                            boundary_flags_1d_device,
+                            charge_map_1d_device,
+                            ion_exclusion_map_1d_device,
+                            sum_sq_device,
+                            max_dphi_device,
+                        )
+                        cuda.synchronize()
+                    else:
+                        # Regular iteration
+                        _cuda_iterate_nwt[n_blocks, num_cuda_threads](
+                            vacuum,
+                            even_odd,
+                            non_zero_salt,
+                            approx_zero,
+                            omega_adaptive,
+                            grid_shape_device,
+                            read_half_device,
+                            write_half_device,
+                            salt_ions_solvation_penalty_map_1d_device,
+                            epsmap_midpoints_1d_device,
+                            eps_midpoint_neighs_sum_only_1d_device,
+                            boundary_flags_1d_device,
+                            charge_map_1d_device,
+                            ion_exclusion_map_1d_device,
+                        )
+                        cuda.synchronize()
+
+            # --- Fetch RMSD / maxΔφ after block ---
+            sum_sq_device.copy_to_host(sum_sq_host)
+            max_dphi_device.copy_to_host(max_dphi_host)
+
+            total_iter += itr_block_size
+            rmsd = math.sqrt(sum_sq_host[0] / num_grid_points_half)
+            max_delta_phi = abs(max_dphi_host[0])
+            toc_block = time.perf_counter()
+
+            vprint(
+                INFO,
+                _VERBOSITY,
+                f"    PBE> | {total_iter:10d} | {rmsd:10.4e} | {max_delta_phi:10.4e} | {toc_block - tic_block:14.6f} |",
+            )
+
+            # --- unified iteration control ---
+            stop_iters, status, ptr, wrapped = _iteration_control_check(
+                rmsd_buffer,
+                ptr,
+                wrapped,
+                rmsd,
+                max_delta_phi,
+                rms_tol,
+                dphi_tol,
+                check_dphi,
+                max_nonlinear_iters,
+                total_iter,
+                disable_stagnation_check=False,
+            )
+
+            if stop_iters:
+                if status == 1:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (RMSD/ΔΦ thresholds satisfied)",
+                    )
+                elif status == 2:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Convergence reached (stagnation plateau, relaxed criterion)",
+                    )
+                elif status == 3:
+                    vprint(
+                        INFO,
+                        _VERBOSITY,
+                        "    PBE> Divergence detected (non-finite residuals)",
+                    )
+                break
+
+        # --- Final copy back ---
+        phi_even_device.copy_to_host(phi_even_1d)
+        phi_odd_device.copy_to_host(phi_odd_1d)
+        _copy_to_full(phimap_current_1d, phi_even_1d, 0, 2)
+        _copy_to_full(phimap_current_1d, phi_odd_1d, 1, 2)
+
+        return rmsd, max_delta_phi, total_iter
+
     def _solve_nonlinear_pb_nwt(
         self,
         vacuum: delphi_bool,
         phimap_current_1d: np.ndarray[delphi_real],
         non_zero_salt: delphi_bool,
         approx_zero: delphi_real,
-        epkt: delphi_real,
+        omega_adaptive: delphi_real,
         grid_shape: np.ndarray[delphi_int],
         salt_ions_solvation_penalty_map_1d: np.ndarray[delphi_real],
         epsmap_midpoints_1d: np.ndarray[delphi_real],
         eps_midpoint_neighs_sum_only_1d: np.ndarray[delphi_real],
-        boundary_gridpoints_1d: np.ndarray[delphi_bool],
+        boundary_flags_1d: np.ndarray[delphi_bool],
         charge_map_1d: np.ndarray[delphi_real],
         ion_exclusion_map_1d: np.ndarray[delphi_real],
         itr_block_size: delphi_int,
@@ -303,246 +670,95 @@ class NLNewtonPBESolver:
         max_rms: delphi_real,
         max_dphi: delphi_real,
         check_dphi: delphi_bool,
-        platform_active: str,  # "cpu" or "cuda"
+        platform_active: str,
         num_cuda_threads: delphi_int,
         num_cpu_threads: delphi_int,
         verbosity_level: int,
-        num_grid_points: delphi_int,
-    ) -> np.ndarray[delphi_real]:
+    ):
         """
-        Performs the core iterative solution loop for the Non-linear Poisson-Boltzmann
-        Equation using the Newton-like method.
-
-        This method encapsulates the allocation/initialization of working arrays
-        (even/odd potentials), the iteration loop (Steps 7), and associated CUDA
-        memory cleanup (Step 8). It operates on the provided potential array
-        `phimap_current_1d`, updating it in-place. The convergence check logic
-        is replicated as found in the source.
-
-        Args:
-            phimap_current_1d (np.ndarray[delphi_real]): 1D array for the full potential map.
-                Used as input initial guess and updated in-place to the final solution.
-                Note: The state of this array *before* the last block iteration is
-                used in the RMSD calculation.
-            omega (delphi_real): The SOR relaxation factor.
-            approx_zero (delphi_real): Value considered approximately zero.
-            grid_shape (np.ndarray[delphi_int]): Shape of the 3D grid.
-            epsmap_midpoints_1d (np.ndarray[delphi_real]): Dielectric map at midpoints.
-            eps_midpoint_neighs_sum_only_1d (np.ndarray[delphi_real]):
-                Neighbor epsilon sums including salt screening.
-            boundary_gridpoints_1d (np.ndarray[delphi_bool]): Boundary points array.
-            charge_map_1d (np.ndarray[delphi_real]): Charge distribution map.
-            itr_block_size (delphi_int): Number of iterations per block.
-            max_nonlinear_iters (delphi_int): Maximum total iterations.
-            max_rms (delphi_real): RMSD convergence tolerance.
-            max_dphi (delphi_real): Max dPhi convergence tolerance.
-            check_dphi (delphi_bool): Flag to use max dPhi for convergence.
-            platform_active (str): "cpu" or "cuda".
-            num_cuda_threads (delphi_int): Threads per block for CUDA.
-            num_cpu_threads (delphi_int): Threads for CPU parallelization.
-            verbosity_level (int): Verbosity level.
-            num_grid_points (delphi_int): Total grid points.
-
-        Returns:
-            np.ndarray[delphi_real]: The updated `phimap_current_1d` array containing the converged potential.
+        Unified Newton-like PB solver orchestrator.
+        Dispatches to CPU or CUDA backend according to `platform_active`.
         """
-        # --- 5. Iterative Solver Setup ---
-        num_grid_points_half = (num_grid_points + 1) // 2
-        phimap_even_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
-        phimap_odds_1d = np.zeros(num_grid_points_half, dtype=delphi_real)
-        _copy_to_sample(phimap_even_1d, phimap_current_1d, offset=0, skip=2)
-        _copy_to_sample(phimap_odds_1d, phimap_current_1d, 1, 2)
-
-        # --- 6. CUDA Setup ---
+        # print(
+        #     "ORCHES:",
+        #     boundary_flags_1d.dtype,
+        #     boundary_flags_1d.min(),
+        #     boundary_flags_1d.max(),
+        # )
         if platform_active == "cuda":
-            n_blocks = (num_grid_points_half + num_cuda_threads - 1) // (
-                num_cuda_threads
+            # print(
+            #     "CUDA: nonzero salt penalty count:",
+            #     np.count_nonzero(salt_ions_solvation_penalty_map_1d),
+            # )
+            # print(
+            #     "CUDA: salt penalty mean:", np.mean(salt_ions_solvation_penalty_map_1d)
+            # )
+
+            rmsd, max_change, total_iter = self._cuda_solve_nonlinear_pb_nwt(
+                vacuum=vacuum,
+                phimap_current_1d=phimap_current_1d,
+                non_zero_salt=non_zero_salt,
+                approx_zero=approx_zero,
+                omega_adaptive=omega_adaptive,
+                grid_shape=grid_shape,
+                salt_ions_solvation_penalty_map_1d=salt_ions_solvation_penalty_map_1d,
+                epsmap_midpoints_1d=epsmap_midpoints_1d,
+                eps_midpoint_neighs_sum_only_1d=eps_midpoint_neighs_sum_only_1d,
+                boundary_flags_1d=boundary_flags_1d,
+                charge_map_1d=charge_map_1d,
+                ion_exclusion_map_1d=ion_exclusion_map_1d,
+                itr_block_size=itr_block_size,
+                max_nonlinear_iters=max_nonlinear_iters,
+                rms_tol=max_rms,
+                dphi_tol=max_dphi,
+                check_dphi=check_dphi,
+                num_cuda_threads=num_cuda_threads,
+                verbosity_level=verbosity_level,
             )
-            grid_shape_device = cuda.to_device(grid_shape)
-            epsmap_midpoints_1d_device = cuda.to_device(epsmap_midpoints_1d)
-            eps_midpoint_neighs_sum_only_1d_device = cuda.to_device(
-                eps_midpoint_neighs_sum_only_1d
+        else:
+            if DEBUG >= _VERBOSITY:
+                nzsc = (np.count_nonzero(salt_ions_solvation_penalty_map_1d),)
+                vprint(
+                    DEBUG,
+                    _VERBOSITY,
+                    f"CPU: nonzero salt penalty count: {nzsc}",
+                )
+                sionmean = np.mean(salt_ions_solvation_penalty_map_1d)
+                vprint(
+                    DEBUG,
+                    _VERBOSITY,
+                    f"CPU: salt penalty mean: {sionmean}",
+                )
+
+            rmsd, max_change, total_iter = self._cpu_solve_nonlinear_pb_nwt(
+                vacuum=vacuum,
+                phimap_current_1d=phimap_current_1d,
+                non_zero_salt=non_zero_salt,
+                approx_zero=approx_zero,
+                omega_adaptive=omega_adaptive,
+                grid_shape=grid_shape,
+                salt_ions_solvation_penalty_map_1d=salt_ions_solvation_penalty_map_1d,
+                epsilon_map_midpoints_1d=epsmap_midpoints_1d,
+                epsilon_sum_neighbors_sum_only_1d=eps_midpoint_neighs_sum_only_1d,
+                boundary_flags_1d=boundary_flags_1d,
+                charge_map_1d=charge_map_1d,
+                ion_exclusion_map_1d=ion_exclusion_map_1d,
+                itr_block_size=itr_block_size,
+                max_nonlinear_iters=max_nonlinear_iters,
+                rms_tol=max_rms,
+                dphi_tol=max_dphi,
+                check_dphi=check_dphi,
+                num_cpu_threads=num_cpu_threads,
+                verbose=verbosity_level,
             )
-            boundary_gridpoints_1d_device = cuda.to_device(boundary_gridpoints_1d)
-            charge_map_1d_device = cuda.to_device(charge_map_1d)
-            ion_exclusion_map_1d_device = cuda.to_device(ion_exclusion_map_1d)
 
         vprint(
-            DEBUG, _VERBOSITY, "phimap_current_1d before itr:", phimap_current_1d[:100]
+            INFO,
+            _VERBOSITY,
+            f"    PBE> Nonlinear solver finished after {total_iter} iterations",
         )
 
-        # --- 7. Iteration Loop ---
-        do_iterate, itr_num = True, 0
-        while do_iterate:
-            tic_itr = time.perf_counter()
-            if itr_num == 0:
-                vprint(
-                    INFO,
-                    _VERBOSITY,
-                    f"    PBE> | #Iteration |    RMSD    |  Max(dPhi) | Time (seconds) |",
-                )
-
-            if platform_active == "cuda":
-                # Transfer iteration-specific data to CUDA device for computation (already done in moved Step 6)
-                # phimap_even_1d_device and phimap_odds_1d_device need to be transferred *inside* the loop block
-                phimap_even_1d_device = cuda.to_device(phimap_even_1d)
-                phimap_odds_1d_device = cuda.to_device(phimap_odds_1d)
-                salt_ions_solvation_penalty_map_1d_device = cuda.to_device(
-                    salt_ions_solvation_penalty_map_1d
-                )
-
-                for itrid in range(itr_num + 1, itr_num + itr_block_size + 1):
-                    for even_odd in np.array([0, 1], dtype=delphi_int):
-                        if even_odd == 0:
-                            # 7.1. Iterate for even indexed grid points using CUDA kernel
-                            _cuda_iterate_nwt[n_blocks, num_cuda_threads](
-                                vacuum,
-                                even_odd,
-                                non_zero_salt,
-                                approx_zero,
-                                grid_shape_device,
-                                phimap_odds_1d_device,
-                                phimap_even_1d_device,
-                                salt_ions_solvation_penalty_map_1d_device,
-                                epsmap_midpoints_1d_device,
-                                eps_midpoint_neighs_sum_only_1d_device,
-                                boundary_gridpoints_1d_device,
-                                charge_map_1d_device,
-                                ion_exclusion_map_1d_device,
-                            )
-                        elif even_odd == 1:
-                            # 7.2. Iterate for odd indexed grid points using CUDA kernel
-                            _cuda_iterate_nwt[n_blocks, num_cuda_threads](
-                                vacuum,
-                                even_odd,
-                                non_zero_salt,
-                                approx_zero,
-                                grid_shape_device,
-                                phimap_even_1d_device,
-                                phimap_odds_1d_device,
-                                salt_ions_solvation_penalty_map_1d_device,
-                                epsmap_midpoints_1d_device,
-                                eps_midpoint_neighs_sum_only_1d_device,
-                                boundary_gridpoints_1d_device,
-                                charge_map_1d_device,
-                                ion_exclusion_map_1d_device,
-                            )
-                        if itrid == itr_num + itr_block_size - 1:
-                            # For the second to last iteration in the block, copy results back to host for RMSD check
-                            phimap_odds_1d_device.copy_to_host(phimap_odds_1d)
-                            # Update full potential map with the latest odd potential values
-                            _copy_to_full(
-                                phimap_current_1d,
-                                phimap_odds_1d,
-                                1,
-                                2,
-                            )
-
-                # Fetch final results from CUDA device to host after the block
-                phimap_odds_1d_device.copy_to_host(phimap_odds_1d)
-                phimap_even_1d_device.copy_to_host(phimap_even_1d)
-                # Release iteration-specific CUDA memory
-                phimap_odds_1d_device = None
-                phimap_even_1d_device = None
-
-            elif platform_active == "cpu":
-                set_num_threads(num_cpu_threads)
-                # 7.3. Iterate block of grid points (excluding the last iteration) on CPU
-                _cpu_iterate_block_nwt(
-                    vacuum,
-                    itr_num,  # Global iteration number counter
-                    itr_block_size - 1,
-                    non_zero_salt,
-                    approx_zero,
-                    epkt,
-                    grid_shape,
-                    phimap_odds_1d,
-                    phimap_even_1d,
-                    salt_ions_solvation_penalty_map_1d,
-                    epsmap_midpoints_1d,
-                    eps_midpoint_neighs_sum_only_1d,
-                    boundary_gridpoints_1d,
-                    charge_map_1d,
-                    ion_exclusion_map_1d,
-                )
-                # Update full potential map with odd potentials after block iteration
-                _copy_to_full(
-                    phimap_current_1d,
-                    phimap_odds_1d,
-                    1,
-                    2,
-                )
-                # 7.4. Iterate the last iteration of the block separately on CPU
-                _cpu_iterate_block_nwt(
-                    vacuum,
-                    # Global iteration number counter for the last iter
-                    itr_num + itr_block_size - 1,
-                    1,
-                    non_zero_salt,
-                    approx_zero,
-                    epkt,
-                    grid_shape,
-                    phimap_odds_1d,
-                    phimap_even_1d,
-                    salt_ions_solvation_penalty_map_1d,
-                    epsmap_midpoints_1d,
-                    eps_midpoint_neighs_sum_only_1d,
-                    boundary_gridpoints_1d,
-                    charge_map_1d,
-                    ion_exclusion_map_1d,
-                )
-
-            # After the block iterations (CPU or CUDA), update the global iteration counter
-            itr_num += itr_block_size
-
-            # 7.5. Calculate RMSD and Max dPhi for convergence check
-            rmsd, max_delta_phi = _calculate_phi_map_sample_rmsd(
-                phimap_current_1d,  # State before the last iteration of the block
-                phimap_odds_1d,  # State after the last-1 iteration of the block
-                offset=1,
-                stride=2,
-                num_cpu_threads=num_cpu_threads,
-                dtype=delphi_real,
-            )
-            max_delta_phi = abs(max_delta_phi)
-
-            # --- Convergence Check ---
-            # Check if maximum iterations limit is reached (for the total iterations completed)
-            if itr_num >= max_nonlinear_iters:
-                do_iterate = False
-            # Check for convergence based on RMSD or Max dPhi
-            elif (not check_dphi) and rmsd < max_rms:
-                do_iterate = False
-            elif check_dphi and max_delta_phi < max_dphi:
-                do_iterate = False
-
-            # After convergence check, update phimap_current_1d for the *next* block's starting state
-            # Need to copy the final even and odd results after the block into phimap_current_1d.
-            # The original code copies even results here. Odd results were copied earlier.
-            _copy_to_full(
-                phimap_current_1d,
-                phimap_even_1d,
-                0,
-                2,
-            )
-
-            toc_itr = time.perf_counter()
-
-            vprint(
-                INFO,
-                _VERBOSITY,
-                f"    PBE> | {itr_num:>10d} | {rmsd:>9.04e} | {max_delta_phi:>9.04e} | {toc_itr - tic_itr:14.06f} |",
-            )
-
-        # --- 8. CUDA Memory Cleanup (LIFTED DIRECTLY FROM ORIGINAL CODE) ---
-        if platform_active == "cuda":
-            grid_shape_device = None
-            epsmap_midpoints_1d_device = None
-            eps_midpoint_neighs_sum_only_1d_device = None
-            boundary_gridpoints_1d_device = None
-            charge_map_1d_device = None
-
-        return phimap_current_1d
+        return rmsd, max_change, total_iter
 
     def solve_pbe(
         self,
@@ -565,12 +781,12 @@ class NLNewtonPBESolver:
         check_dphi: delphi_bool,
         epkt: delphi_real,
         approx_zero: delphi_real,
+        omega_adaptive: delphi_real,
         grid_shape: np.ndarray[delphi_int],
         grid_origin: np.ndarray[delphi_real],
         grid_shape_parentrun: np.ndarray[delphi_int],
         grid_origin_parentrun: np.ndarray[delphi_real],
         atoms_data: np.ndarray[delphi_real],
-        density_map_1d: np.ndarray[delphi_real],
         ion_exclusion_map_1d: np.ndarray[delphi_real],
         epsilon_map_1d: np.ndarray[delphi_real],
         epsmap_midpoints_1d: np.ndarray[delphi_real],
@@ -610,12 +826,12 @@ class NLNewtonPBESolver:
             check_dphi (delphi_bool): Flag to use max_dphi instead of max_rms for convergence check.
             epkt (delphi_real): kT/e in the appropriate units.
             approx_zero (delphi_real): A value considered close to zero.
+            omega_adaptive (delphi_real): Adaptive damping factor to use in NWT.
             grid_shape (np.ndarray[delphi_int]): Shape of the 3D grid (nx, ny, nz).
             grid_origin (np.ndarray[delphi_real]): Origin coordinates of the grid.
             grid_shape_parentrun (np.ndarray[delphi_int]): Shape of the parent grid (if applicable).
             grid_origin_parentrun (np.ndarray[delphi_real]): Origin of the parent grid (if applicable).
             atoms_data (np.ndarray[delphi_real]): Array containing atom data (coords, radii, charges).
-            density_map_1d (np.ndarray[delphi_real]): 1D map of atom density/exclusion volumes.
             ion_exclusion_map_1d (np.ndarray[delphi_real]): 1D boolean map marking ion exclusion regions.
             epsilon_map_1d (np.ndarray[delphi_real]): 1D map of dielectric constants at grid points.
             epsmap_midpoints_1d (np.ndarray[delphi_real]): 1D map of dielectric constants at cell midpoints.
@@ -722,21 +938,19 @@ class NLNewtonPBESolver:
             TRACE,
             _VERBOSITY,
             "phimap_current_1d after bc:",
-            phimap_current_1d[
-                : min(100, self.num_grid_points)
-            ],  # Print up to 100 elements or total points
+            phimap_current_1d[: min(100, self.num_grid_points)],
         )
 
         # --- 4. Preparation for Iteration Phase ---
         # Allocate/get eps_midpoint_neighs_sum_only_1d and boundary_gridpoints_1d
-        eps_midpoint_neighs_sum_only_1d = np.empty(
+        eps_midpoint_neighs_sum_only_1d = np.zeros(
             self.num_grid_points,
-            dtype=delphi_real,  # Access num_grid_points from self
+            dtype=delphi_real,
         )
 
-        boundary_gridpoints_1d = np.empty(
+        boundary_gridpoints_1d = np.zeros(
             self.num_grid_points,
-            dtype=delphi_bool,  # Access num_grid_points from self
+            dtype=delphi_bool,
         )
 
         charge_map_1d = np.copy(self.grid_charge_map_1d)
@@ -754,7 +968,8 @@ class NLNewtonPBESolver:
             epsmap_midpoints_1d=epsmap_midpoints_1d,  # Assuming epsmap_midpoints_1d is pre-calculated
             charge_map_1d=charge_map_1d,
             eps_midpoint_neighs_sum_only_1d=eps_midpoint_neighs_sum_only_1d,
-            boundary_gridpoints_1d=boundary_gridpoints_1d,
+            ion_exclusion_map_1d=ion_exclusion_map_1d,
+            boundary_flags_1d=boundary_gridpoints_1d,
         )
         toc_prepitr = time.perf_counter()
         self.timings[f"pb, {self.phase}| prepare for iteration"] = "{:0.3f}".format(
@@ -797,12 +1012,12 @@ class NLNewtonPBESolver:
             phimap_current_1d=phimap_current_1d,
             non_zero_salt=non_zero_salt,
             approx_zero=approx_zero,
-            epkt=epkt,
+            omega_adaptive=omega_adaptive,
             grid_shape=grid_shape,
             salt_ions_solvation_penalty_map_1d=salt_ions_solvation_penalty_map_1d,
             epsmap_midpoints_1d=epsmap_midpoints_1d,
             eps_midpoint_neighs_sum_only_1d=eps_midpoint_neighs_sum_only_1d,
-            boundary_gridpoints_1d=boundary_gridpoints_1d,
+            boundary_flags_1d=boundary_gridpoints_1d,
             charge_map_1d=charge_map_1d,
             ion_exclusion_map_1d=ion_exclusion_map_1d,
             itr_block_size=itr_block_size,
@@ -814,7 +1029,6 @@ class NLNewtonPBESolver:
             num_cuda_threads=self.num_cuda_threads,
             num_cpu_threads=self.platform.names["cpu"]["num_threads"],
             verbosity_level=self.verbosity,
-            num_grid_points=self.num_grid_points,
         )
 
         toc_total = time.perf_counter()
@@ -914,7 +1128,7 @@ class NLNewtonPBESolver:
                 ) // self.num_cuda_threads
                 grid_shape_device = cuda.to_device(grid_shape)
                 atoms_data_device = cuda.to_device(atoms_data)
-                phimap_1d_device = cuda.device_array_like(phimap_1d)
+                phimap_1d_device = cuda.to_device(phimap_1d)
                 # CALL: CUDA kernel for the computation
                 _cuda_setup_coulombic_boundary_condition[
                     n_blocks, self.num_cuda_threads
@@ -985,7 +1199,7 @@ class NLNewtonPBESolver:
                     grid_centroid_nve_charge_device = cuda.to_device(
                         grid_centroid_nve_charge
                     )
-                    phimap_1d_device = cuda.device_array_like(phimap_1d)
+                    phimap_1d_device = cuda.to_device(phimap_1d)
                     # CALL: CUDA kernel for the computation
                     _cuda_setup_dipolar_boundary_condition[
                         n_blocks, self.num_cuda_threads

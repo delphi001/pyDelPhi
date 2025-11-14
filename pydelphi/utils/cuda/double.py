@@ -18,15 +18,6 @@
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
 #
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
 # PyDelphi is free software: you can redistribute it and/or modify
 # (at your option) any later version.
 #

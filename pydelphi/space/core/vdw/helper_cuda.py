@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 GPU-accelerated algorithm for building a zeta surface map using CUDA.
@@ -320,7 +302,7 @@ def build_zeta_surface_map_cuda_parallel_block(
         index_discrete_epsilon_map_1d.astype(np.int32)
     )
 
-    block_counts = cuda.device_array(num_blocks, dtype=np.int32)
+    block_counts = cuda.to_device(np.zeros(num_blocks, dtype=np.int32))
     binary_map_shared = cuda.shared.array(block_dim, dtype=np.uint8)
 
     x_stride = grid_shape[1] * grid_shape[2]
@@ -369,8 +351,8 @@ def build_zeta_surface_map_cuda_parallel_block(
     total_points = np.sum(block_counts_host)
 
     # Step 4: Write to global output arrays with offsets
-    out_coords_d = cuda.device_array((total_points, 3), dtype=np.float32)
-    out_indices_d = cuda.device_array((total_points, 3), dtype=np.int32)
+    out_coords_d = cuda.to_device(np.zeros((total_points, 3), dtype=np.float32))
+    out_indices_d = cuda.to_device(np.zeros((total_points, 3), dtype=np.int32))
 
     for block_index in range(num_blocks):
         start_index = block_index * elements_per_block

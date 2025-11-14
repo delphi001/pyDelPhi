@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 """
 Module: delphi_routines
@@ -309,8 +292,7 @@ def _cpu_calc_gaussian_density_map(
                                 total_density_half_hz = 1.0 - (
                                     1.0 - total_density_half_hz
                                 ) * (1.0 - density_hz)
-                    # --- End of original inner loop logic ---
-        # --- Optimized Inner Loop End ---
+        # --- Inner Loop End ---
 
         # Assign final densities for this grid point ijk1d
         gauss_density_map_1d[ijk1d] = delphi_real(total_density)
@@ -678,8 +660,10 @@ def calc_spatial_epsilon_map_midpoints(
     epsilon_gauss_1d = np.zeros(num_grid_points, dtype=delphi_real)
     epsilon_r_1d = np.zeros(num_grid_points, dtype=delphi_real)
 
-    epsilon_r_midpoints_1d = np.empty(num_mid_points, dtype=delphi_real)
-    epsilon_r_midpoints_1d.fill(epsout)
+    epsilon_r_midpoints_1d = np.full(
+        num_mid_points, fill_value=epsout, dtype=delphi_real
+    )
+    # epsilon_r_midpoints_1d.fill(epsout)
 
     y_stride: delphi_int = grid_shape[2]
     x_stride: delphi_int = grid_shape[1] * y_stride
@@ -801,17 +785,17 @@ def calc_gaussian_cutoff_spatial_epsilon_map_midpoints(
     num_mid_points = gauss_density_map_midpoints_1d.shape[0]
     epsout = delphi_real(1.0) if vaccum else exdi
 
-    spatial_outeps_limit = np.empty(2, dtype=delphi_real)
+    spatial_outeps_limit = np.zeros(2, dtype=delphi_real)
     spatial_outeps_limit[0] = exdi
     spatial_outeps_limit[1] = gapdi
 
-    epsilon_r_1d = np.empty(num_grid_points, dtype=delphi_real)
+    epsilon_r_1d = np.zeros(num_grid_points, dtype=delphi_real)
     epsilon_r_1d.fill(epsout)
     # Calculate density dependent epsilon on gridpoints.
     # ATTENTION: here we use exdi in contrast to gapdi used with gaussian surface to mimic original gaussiancutoff.
     _calc_gaussian_epsilon_map(exdi, indi, gauss_density_map_1d, epsilon_r_1d)
 
-    epsilon_r_midpoints_1d = np.empty(num_mid_points, dtype=delphi_real)
+    epsilon_r_midpoints_1d = np.zeros(num_mid_points, dtype=delphi_real)
     epsilon_r_midpoints_1d.fill(epsout)
 
     z_stride: delphi_int = 1
@@ -857,9 +841,9 @@ def calc_gaussian_cutoff_spatial_epsilon_map_midpoints(
     minus_z_offset = -z_stride * 3 + 2
     # Loop 3: Smoothing pass (split into even/odd sets to avoid race conditions)
     num_grid_points_one_kind = num_grid_points // 2 + 1
-    for index_kind in (0, 1):  # 0 = even, 1 = odd
+    for even_odd in (0, 1):  # 0 = even, 1 = odd
         for ijk1d_strided in prange(num_grid_points_one_kind):
-            ijk1d = ijk1d_strided * 2 + index_kind
+            ijk1d = ijk1d_strided * 2 + even_odd
             if ijk1d < num_grid_points:
                 i = ijk1d // x_stride
                 j = (ijk1d - i * x_stride) // y_stride
@@ -888,7 +872,7 @@ def calc_gaussian_cutoff_spatial_epsilon_map_midpoints(
                         if not ion_exclusion_map_1d[ijk1d]:
                             ion_exclusion_map_1d[ijk1d] = True
 
-                        neigh_eps = np.empty(6, dtype=delphi_real)
+                        neigh_eps = np.zeros(6, dtype=delphi_real)
                         neigh_eps[0] = epsilon_r_midpoints_1d[ijk1d_x_3]
                         neigh_eps[1] = epsilon_r_midpoints_1d[ijk1d_x_3 + 1]
                         neigh_eps[2] = epsilon_r_midpoints_1d[ijk1d_x_3 + 2]
@@ -1610,7 +1594,7 @@ def calc_grad_surface_map_analytical(
     - `set_num_threads` (utility function).
     - `_cpu_calc_grad_surface_map_analytical` (CPU kernel).
     - `_cuda_calc_grad_surface_map_analytical` (CUDA kernel).
-    - `numba.cuda` for CUDA device operations (to_device, device_array_like, copy_to_host).
+    - `numba.cuda` for CUDA device operations (to_device, copy_to_host).
     - `_build_neighbor_voxel_atom_index_map` (utility function to build voxel map).
     - `pretty_print_neighbor_voxel_unique_atom_ids` (utility for debugging).
     - `NEIGHBOR_VOXEL_REL_COORDS` (constant).
@@ -1663,7 +1647,7 @@ def calc_grad_surface_map_analytical(
         atoms_data_device = cuda.to_device(atoms_data)
         densitymap_gridpoints_1d_device = cuda.to_device(densitymap_gridpoints_1d)
         surface_map_1d_device = cuda.to_device(surface_map_1d)
-        grad_surface_map_1d_device = cuda.device_array_like(grad_surface_map_1d)
+        grad_surface_map_1d_device = cuda.to_device(grad_surface_map_1d)
 
         # Transfer Voxel Map Parameters to device
         neighbor_voxel_atom_ids_flat_device = cuda.to_device(
@@ -1738,7 +1722,7 @@ def calc_gaussian_like_surface(
     - `set_num_threads` (utility function).
     - `_cpu_calc_gaussian_like_surface` (CPU kernel).
     - `_cuda_calc_gaussian_like_surface` (CUDA kernel).
-    - `numba.cuda` for CUDA device operations (to_device, device_array_like, copy_to_host).
+    - `numba.cuda` for CUDA device operations (to_device, copy_to_host).
     - `delphi_real` (type alias).
     - `APPROX_ZERO` (constant, though `approx_zero` is passed as an argument).
     """
@@ -1755,7 +1739,7 @@ def calc_gaussian_like_surface(
             gauss_density_solvent_1d.size + num_cuda_threads - 1
         ) // num_cuda_threads
         gauss_density_solvent_1d_device = cuda.to_device(gauss_density_solvent_1d)
-        surface_map_1d_device = cuda.device_array_like(surface_map_1d)
+        surface_map_1d_device = cuda.to_device(surface_map_1d)
         _cuda_calc_gaussian_like_surface[num_blocks, num_cuda_threads](
             surf_den_exp_scaled,
             delphi_real(APPROX_ZERO),  # Ensure approx_zero is correct type

@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 import math
 import numpy as np
@@ -69,13 +52,13 @@ from pydelphi.constants import (
 # size is often set relative to atom radii.
 #
 # Initialization and Robustness:
-# This array is explicitly sized to (125, 3) (5*5*5 = 125 coordinates) using `np.empty`
+# This array is explicitly sized to (125, 3) (5*5*5 = 125 coordinates) using `np.zeros`
 # and filled directly. This makes its dimensions transparent and consistent with its name.
 # It is populated once when the module loads and then explicitly set to read-only
 # (`flags.writeable = False`) to prevent any accidental modification during runtime.
 # This ensures its immutability as a constant lookup table for both CPU and CUDA kernels.
 
-_NEIGHBOR_VOXEL_REL_COORDS_5X5X5 = np.empty((125, 3), dtype=np.int32)
+_NEIGHBOR_VOXEL_REL_COORDS_5X5X5 = np.zeros((125, 3), dtype=np.int32)
 _idx = 0
 for dz in range(-2, 3):
     for dy in range(-2, 3):

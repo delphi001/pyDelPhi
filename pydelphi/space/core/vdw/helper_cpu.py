@@ -17,24 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
 
 """
 CPU-parallel, block-based algorithm for building a zeta surface map.
@@ -263,8 +245,8 @@ def build_zeta_surface_map_cpu_parallel_block(
     total_points = np.sum(block_counts)
 
     # Step 4: Write to global output arrays with offsets in parallel
-    out_coords = np.empty((total_points, 3), dtype=np.float32)
-    out_indices = np.empty((total_points, 3), dtype=np.int32)
+    out_coords = np.zeros((total_points, 3), dtype=np.float32)
+    out_indices = np.zeros((total_points, 3), dtype=np.int32)
 
     for thread_id in prange(num_threads):
         start_index = thread_id * elements_per_chunk

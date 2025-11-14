@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 from numba import njit, prange
 import numpy as np
@@ -116,7 +99,7 @@ def _count_atom_pairs(
 
 @njit(nogil=True)
 def _prefix_sum(arr):
-    out = np.empty_like(arr)
+    out = np.zeros_like(arr)
     total = 0
     for i in range(len(arr)):
         out[i] = total
@@ -277,7 +260,7 @@ def _calculate_exposed_grids(
     )
 
     total = 0
-    offsets = np.empty_like(estimated_grid_counts)
+    offsets = np.zeros_like(estimated_grid_counts)
     for i in range(n_pairs):
         offsets[i] = total
         total += estimated_grid_counts[i]

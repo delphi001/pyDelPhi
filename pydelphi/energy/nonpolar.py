@@ -17,23 +17,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pyDelPhi. If not, see <https://www.gnu.org/licenses/>.
 
-#
-# pyDelPhi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# pyDelPhi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
-
-#
-# PyDelphi is free software: you can redistribute it and/or modify
-# (at your option) any later version.
-#
-# PyDelphi is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#
 
 # import numpy as np
 # from numba import njit, prange
@@ -245,7 +228,7 @@
 #         parent_stack_idx = dfs_stack_parent_idx[current_stack_idx]
 #
 #         # Reconstruct current tuple path
-#         current_tuple_indices_temp = np.empty(max_order_runtime, dtype=delphi_int)
+#         current_tuple_indices_temp = np.zeros(max_order_runtime, dtype=delphi_int)
 #         current_tuple_len = 0
 #         temp_s_idx = current_stack_idx
 #         while temp_s_idx != -1:
@@ -488,48 +471,48 @@
 #
 #     # --- Buffers for DFS and Overlap Tuple Generation ---
 #     # DFS Stack: Stores current path and parent info
-#     dfs_stack_atom_idx = np.empty(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
+#     dfs_stack_atom_idx = np.zeros(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
 #     dfs_stack_parent_idx = np.full(_MAX_DFS_STACK_SIZE, -1, dtype=delphi_int)
 #     # Stack pointers for common neighbor data within the stack frame.
 #     # Not strictly needed if common neighbors are recomputed on demand from current_tuple,
 #     # but could be useful if wanting to cache common neighbor lists.
-#     dfs_stack_common_nb_start_idx = np.empty(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
-#     dfs_stack_common_nb_count = np.empty(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
-#     dfs_stack_common_nb_curr_ptr = np.empty(_MAX_DFS_STACK_SIZE, dtype=delphi_int)  # Iterator for common neighbors
+#     dfs_stack_common_nb_start_idx = np.zeros(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
+#     dfs_stack_common_nb_count = np.zeros(_MAX_DFS_STACK_SIZE, dtype=delphi_int)
+#     dfs_stack_common_nb_curr_ptr = np.zeros(_MAX_DFS_STACK_SIZE, dtype=delphi_int)  # Iterator for common neighbors
 #     dfs_stack_ptr = np.array([0], dtype=delphi_int)  # Pointer for the stack top
 #
 #     # Common Neighbors Buffer (for `find_common_neighbors_of_list_in_place`)
 #     # This is a flat array to store actual common neighbor indices for current tuple expansion.
-#     common_neighbors_buffer = np.empty(_MAX_COMMON_NB_DATA_TOTAL, dtype=delphi_int)
+#     common_neighbors_buffer = np.zeros(_MAX_COMMON_NB_DATA_TOTAL, dtype=delphi_int)
 #     # Metadata for common neighbors (stores start_idx and count for each list)
 #     # common_neighbors_metadata stores [start_index, count] for common neighbor lists
-#     common_neighbors_metadata = np.empty((_MAX_COMMON_NB_LISTS, 2), dtype=delphi_int)
+#     common_neighbors_metadata = np.zeros((_MAX_COMMON_NB_LISTS, 2), dtype=delphi_int)
 #     flat_common_neighbors_ptr = np.array([0], dtype=delphi_int)  # Pointer for common_neighbors_buffer
 #
 #     # --- Buffers for Results (Volume and Radii Derivatives) ---
 #     # Radii Derivative Updates: Store (atom_idx, value) pairs
-#     radii_derivative_updates_flat = np.empty(_MAX_RD_UPDATES, dtype=delphi_int)
-#     radii_derivative_updates_values = np.empty(_MAX_RD_UPDATES, dtype=delphi_float)
+#     radii_derivative_updates_flat = np.zeros(_MAX_RD_UPDATES, dtype=delphi_int)
+#     radii_derivative_updates_values = np.zeros(_MAX_RD_UPDATES, dtype=delphi_float)
 #     radii_derivative_updates_overall_count = np.array([0], dtype=delphi_int)
 #
 #     # Total Volume Contributions: Store (tuple_indices, value) pairs
 #     # The `+1` is for storing the tuple_len at index 0. Max tuple len is max_order_runtime.
-#     total_volume_contributions_indices = np.empty((_MAX_VOL_CONTRIBUTIONS, max_order_runtime + 1), dtype=delphi_int)
-#     total_volume_contributions_values = np.empty(_MAX_VOL_CONTRIBUTIONS, dtype=delphi_float)
+#     total_volume_contributions_indices = np.zeros((_MAX_VOL_CONTRIBUTIONS, max_order_runtime + 1), dtype=delphi_int)
+#     total_volume_contributions_values = np.zeros(_MAX_VOL_CONTRIBUTIONS, dtype=delphi_float)
 #     total_volume_contributions_count = np.array([0], dtype=delphi_int)
 #
 #     # --- Buffers for Atom Neighbors and Contact Pairs ---
 #     # Max possible neighbors is num_atoms-1 for each atom, sum over all atoms.
 #     # For neighbor_list_indices_buffer, a heuristic is `num_atoms * max_num_neighbors_per_atom`
-#     neighbor_list_indices = np.empty(num_atoms * max_num_neighbors_per_atom * 2, dtype=delphi_int)  # *2 for cushion
-#     neighbor_list_ptr = np.empty(num_atoms + 1, dtype=delphi_int)  # Stores start/end indices for each atom's neighbors
+#     neighbor_list_indices = np.zeros(num_atoms * max_num_neighbors_per_atom * 2, dtype=delphi_int)  # *2 for cushion
+#     neighbor_list_ptr = np.zeros(num_atoms + 1, dtype=delphi_int)  # Stores start/end indices for each atom's neighbors
 #
 #     # Contact matrix for O(1) lookup: is_in_contact_matrix[i,j] = True if i and j are in contact
 #     is_in_contact_matrix = np.full((num_atoms, num_atoms), False, dtype=delphi_bool)
 #
 #     # Flat array to store unique contact pairs (for debugging/verification if needed)
 #     # Max unique pairs: num_atoms * (num_atoms - 1) / 2
-#     contact_pairs_flat_array = np.empty(num_atoms * (num_atoms - 1),
+#     contact_pairs_flat_array = np.zeros(num_atoms * (num_atoms - 1),
 #                                         dtype=delphi_int)  # *2 because each pair is 2 indices
 #     contact_pairs_count_ptr = np.array([0], dtype=delphi_int)
 #
@@ -654,8 +637,8 @@
 #             i,  # Current atom as root
 #             dfs_stack_atom_idx, dfs_stack_parent_idx, dfs_stack_ptr,
 #             dfs_stack_common_nb_start_idx, dfs_stack_common_nb_count, dfs_stack_common_nb_curr_ptr,
-#             np.empty(0, dtype=delphi_int),  # overlap_region_flat_array - not used in this iteration
-#             np.empty(0, dtype=delphi_float),  # overlap_region_info_array - not used in this iteration
+#             np.zeros(0, dtype=delphi_int),  # overlap_region_flat_array - not used in this iteration
+#             np.zeros(0, dtype=delphi_float),  # overlap_region_info_array - not used in this iteration
 #             atom_coords, radii, s_values_sq, inv_s_sq,
 #             neighbor_list_indices, neighbor_list_ptr,
 #             is_in_contact_matrix,
