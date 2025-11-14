@@ -359,6 +359,10 @@ def generate_param_file_content(case_data: dict, project_root: str) -> str:
         content.append(
             f"in(modpdb4, file={get_absolute_example_path('5tif/5tif.pqr')}, format=pqr)"
         )
+    elif example_name == "1he8":
+        content.append(
+            f"in(modpdb4, file={get_absolute_example_path('5tif/5tif.pqr')}, format=pqr)"
+        )
     elif example_name == "nonlinear":
         content.append(
             f"in(pdb, file={get_absolute_example_path('nonlinear/1brs.pdb')})"
