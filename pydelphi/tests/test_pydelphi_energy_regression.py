@@ -361,7 +361,7 @@ def generate_param_file_content(case_data: dict, project_root: str) -> str:
         )
     elif example_name == "1he8":
         content.append(
-            f"in(modpdb4, file={get_absolute_example_path('5tif/5tif.pqr')}, format=pqr)"
+            f"in(modpdb4, file={get_absolute_example_path('1he8/1he8.pqr')}, format=pqr)"
         )
     elif example_name == "nonlinear":
         content.append(
@@ -380,7 +380,7 @@ def generate_param_file_content(case_data: dict, project_root: str) -> str:
         content.append(f"probe_residue = {case_data['probe_residue']}")
     if case_data.get("site") is not None:
         content.append(f"site({case_data['site']})")
-
+    # print("\n".join(content))
     return "\n".join(content)
 
 
