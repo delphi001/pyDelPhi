@@ -13,7 +13,7 @@
 
 ## ✨ Key Features
 
-- **Physics-Faithful Reimplementation**
+- **Methodologically Consistent Reimplementation of DelPhi**
   - Fully compatible with DelPhi 8.5 reference outputs.
   - Validated across protein, nucleic-acid, and viral capsid benchmarks.
 
@@ -70,7 +70,7 @@ conda activate py312_pydelphi_v0_2_0
 ```bash
 git clone https://github.com/<your-org>/pyDelPhi.git
 cd pyDelPhi
-pip install -e .
+pip install .
 ```
 
 Verify installation:
