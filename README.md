@@ -248,7 +248,7 @@ runtime scaling, and memory efficiency across datasets **pm74**, **pp46**, **pd6
 and viral capsid systems — is detailed in the accompanying publication:
 
 > **Pandey, S. K. et al. (2025)**  
-> *pyDelPhi: A Python/Numba Implementation of the DelPhi Poisson–Boltzmann Solver with GPU Acceleration and Extended Modeling Features*  
+> *Accurate and Scalable Continuum Electrostatics for Large Biomolecular Systems: The pyDelPhi Poisson--Boltzmann Framework*  
 > *(manuscript in preparation)*
 
 The benchmarks compare pyDelPhi against the original **DelPhi (C++)** implementation,  
@@ -398,7 +398,7 @@ Each component is self-contained and unit-tested, ensuring that scientific accur
 If you use pyDelPhi in your work, please cite:
 
 > **Pandey, S. K. et al. (2025)**  
-> *pyDelPhi: A Python/Numba Implementation of the DelPhi Poisson–Boltzmann Solver with GPU Acceleration and Extended Modeling Features*  
+> *Accurate and Scalable Continuum Electrostatics for Large Biomolecular Systems: The pyDelPhi Poisson--Boltzmann Framework*  
 > *(manuscript in preparation)*
 
 ---
