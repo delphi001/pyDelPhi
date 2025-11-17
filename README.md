@@ -13,16 +13,17 @@
 
 ## ✨ Key Features
 
-- **Methodologically Consistent Reimplementation of DelPhi**
+- **Methodologically Consistent Reimplementation**
   - Fully compatible with DelPhi 8.5 reference outputs.
   - Validated across protein, nucleic-acid, and viral capsid benchmarks.
 
 - **High-Performance Backends**
   - CPU parallelization via `Numba` and `prange`.
-  - GPU acceleration through custom CUDA kernels optimized for A100-class devices.
+  - GPU acceleration through CUDA kernels.
 
 - **Model Support**
   - Linear and nonlinear PB formulations.
+  - Classical and Regularized PB formalisms.
   - Traditional two-dielectric and Gaussian dielectric models.
   - Cubic and cuboidal grid geometries with automatic padding control.
 
