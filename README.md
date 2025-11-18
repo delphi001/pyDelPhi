@@ -69,7 +69,7 @@ conda activate py312_pydelphi_v0_2_0
 
 ### From Source
 ```bash
-git clone https://github.com/<your-org>/pyDelPhi.git
+git clone https://github.com/delphi001/pyDelPhi.git
 cd pyDelPhi
 pip install .
 ```
